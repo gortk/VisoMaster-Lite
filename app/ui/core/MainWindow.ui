@@ -16,7 +16,7 @@
    </font>
   </property>
   <property name="windowTitle">
-   <string>VisoMaster - Fusion - 1.0.0</string>
+   <string>VisoMaster - Lite - 1.0.0</string>
   </property>
   <property name="windowIcon">
    <iconset resource="media.qrc">
