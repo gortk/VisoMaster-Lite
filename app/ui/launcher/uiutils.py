@@ -1,5 +1,5 @@
 # ---------------------------------------------------------------------------
-# UI Utilities for VisoMaster Fusion Launcher
+# UI Utilities for VisoMaster Lite Launcher
 # ---------------------------------------------------------------------------
 # Provides shared UI helpers:
 #   • make_header_widget() / make_divider() for layout styling
