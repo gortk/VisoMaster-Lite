@@ -1,6 +1,6 @@
 # core.py
 # ---------------------------------------------------------------------------
-# Core Utilities for VisoMaster Fusion Launcher
+# Core Utilities for VisoMaster Lite Launcher
 # ---------------------------------------------------------------------------
 # Provides:
 #   • Centralized filesystem path resolution via PATHS
@@ -24,7 +24,7 @@ def resolve_paths():
     script_path = Path(__file__).resolve()
     ui_dir = script_path.parent.parent  # .../app/ui
     app_dir = ui_dir.parent  # .../app
-    repo_dir = app_dir.parent  # .../VisoMaster-Fusion
+    repo_dir = app_dir.parent  # .../VisoMaster-Lite
     base_dir = repo_dir.parent  # .../VisoMaster
     portable_dir = base_dir / "portable-files"
 
