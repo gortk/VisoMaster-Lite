@@ -1917,13 +1917,37 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
         embed_layout.addWidget(
             self.inputEmbeddingsSearchBox, 0, QtCore.Qt.AlignmentFlag.AlignLeft
         )
+
+        # Force a dark background with a gray hover state for all embedding buttons
+        btn_style = (
+            "QPushButton {"
+            "  background-color: transparent;"
+            "  border: 1px solid #444;"
+            "  border-radius: 3px;"
+            "  padding: 4px 8px;"
+            "}"
+            "QPushButton:hover {"
+            "  background-color: #3a3a3a;"
+            "  border: 1px solid #555;"
+            "}"
+        )
+
         for btn in (
             self.openEditorButton,
             self.openEmbeddingButton,
             self.saveEmbeddingButton,
             self.saveEmbeddingAsButton,
         ):
+            btn.setStyleSheet(btn_style)
             embed_btn_row.addWidget(btn)
+
+        add_tab_btn = getattr(self, "embeddingTabAddButton", None)
+        if add_tab_btn is not None:
+            add_tab_btn.setStyleSheet(btn_style)
+            add_tab_btn.setFixedHeight(self.saveEmbeddingAsButton.sizeHint().height())
+            add_tab_btn.setMinimumWidth(add_tab_btn.sizeHint().width())
+            embed_btn_row.addWidget(add_tab_btn)
+
         embed_btn_row.addStretch()
         embed_layout.addLayout(embed_btn_row)
 
@@ -1942,7 +1966,32 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
                 loc[0].setSpacing(4)
         self.gridLayout_2.setVerticalSpacing(2)
 
+        # Hover-only styling: no button keeps keyboard focus, so the theme's
+        # :focus rule never pins a "highlighted" look. Hover still works.
+        for btn in (
+            self.saveImageButton,
+            self.batchImageButton,
+            self.batchallImageButton,
+            self.openEditorButton,
+            self.openEmbeddingButton,
+            self.saveEmbeddingButton,
+            self.saveEmbeddingAsButton,
+            add_tab_btn,
+            self.findTargetFacesButton,
+            self.clearTargetFacesButton,
+            self.swapfacesButton,
+            self.editFacesButton,
+            self.clearMemoryButton,
+            self.outputFolderButton,
+            self.outputOpenButton,
+            self.buttonTargetVideosPath,
+            self.buttonInputFacesPath,
+        ):
+            if btn is not None:
+                btn.setFocusPolicy(QtCore.Qt.FocusPolicy.NoFocus)
+
         self._custom_bottom_layout_applied = True
+        QtCore.QTimer.singleShot(0, self.setFocus)
 
     def _give_all_stretch_to(self, widget):
         """In the layout holding `widget`, only that column/item takes extra width."""

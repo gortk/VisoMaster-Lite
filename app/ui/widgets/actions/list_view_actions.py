@@ -1945,54 +1945,12 @@ def _make_embeddings_list_widget(main_window: "MainWindow") -> QtWidgets.QListWi
 def _install_add_embedding_tab_button(
     main_window: "MainWindow", tabs: QtWidgets.QTabWidget
 ) -> None:
-    """Create a '+' button anchored right after the last tab in the tab bar."""
-    save_btn = getattr(main_window, "saveEmbeddingButton", None)
-    tab_bar = tabs.tabBar()
-
-    add_btn = QtWidgets.QPushButton("+", tab_bar)
+    """Create the '+' (new embeddings tab) button."""
+    add_btn = QtWidgets.QPushButton("+ Embeddings tab", main_window)
     add_btn.setToolTip("New embeddings tab")
     add_btn.setAutoDefault(False)
-    add_btn.setStyleSheet(
-        "QPushButton {"
-        "  border: 1px solid #3a3a3a;"
-        "  border-radius: 3px;"
-        "  padding: 0px;"
-        "  font-weight: bold;"
-        "}"
-        "QPushButton:hover { border-color: #5a5a5a; }"
-    )
     add_btn.clicked.connect(partial(add_embedding_tab, main_window))
     main_window.embeddingTabAddButton = add_btn
-
-    def reposition() -> None:
-        tab_h = tab_bar.height()
-        if tab_h > 0:
-            ref_h = save_btn.sizeHint().height() if save_btn else 24
-            btn_h = max(18, min(ref_h, tab_h - 2))
-            if add_btn.height() != btn_h:
-                add_btn.setFixedSize(btn_h, btn_h)
-
-        count = tab_bar.count()
-        x = tab_bar.tabRect(count - 1).right() + 4 if count > 0 else 4
-        y = max(0, (tab_bar.height() - add_btn.height()) // 2)
-        add_btn.move(x, y)
-        add_btn.raise_()
-
-    class _RepositionFilter(QtCore.QObject):
-        def eventFilter(self, obj, event):
-            if event.type() == QtCore.QEvent.Type.Resize:
-                QtCore.QTimer.singleShot(0, reposition)
-            return False
-
-    resize_filter = _RepositionFilter(tab_bar)
-    tab_bar.installEventFilter(resize_filter)
-    main_window.embeddingTabAddButtonFilter = resize_filter
-
-    tab_bar.tabMoved.connect(lambda *_: QtCore.QTimer.singleShot(0, reposition))
-    tab_bar.currentChanged.connect(lambda _: QtCore.QTimer.singleShot(0, reposition))
-    main_window.reposition_embedding_tab_add_button = reposition
-    QtCore.QTimer.singleShot(0, reposition)
-
 
 def setup_embedding_tabs(main_window: "MainWindow") -> None:
     """Wrap the existing embeddings list in a tab widget with a + button."""
