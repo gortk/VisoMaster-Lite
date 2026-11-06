@@ -1205,34 +1205,7 @@ def load_saved_workspace(
             }
             for panel_key, visible in panel_state_map.items():
                 main_window._set_panel_visibility(panel_key, visible)
-
-            def restore_checkbox_without_emitting_signals(checkbox, checked: bool):
-                if hasattr(checkbox, "blockSignals"):
-                    previous_state = checkbox.blockSignals(True)
-                    try:
-                        checkbox.setChecked(checked)
-                    finally:
-                        checkbox.blockSignals(previous_state)
-                else:
-                    checkbox.setChecked(checked)
-
-            restore_checkbox_without_emitting_signals(
-                main_window.targetVideosFilterImagesCheckBox,
-                window_state.get("filterImagesCheckBox", True),
-            )
-            restore_checkbox_without_emitting_signals(
-                main_window.targetVideosFilterVideosCheckBox,
-                window_state.get("filterVideosCheckBox", True),
-            )
-            restore_checkbox_without_emitting_signals(
-                main_window.targetVideosFilterWebcamsCheckBox,
-                window_state.get("filterWebcamsCheckBox", False),
-            )
-            restore_checkbox_without_emitting_signals(
-                main_window.targetVideosFilterMenuButton,
-                window_state.get("targetVideosFilterMenuExpanded", False),
-            )
-            target_videos_list_actions.toggle_target_video_filters_sorting(main_window)
+           
             saved_face_thumbnail_size = window_state.get("face_thumbnail_size")
             if saved_face_thumbnail_size == "small":
                 list_view_actions.apply_face_thumbnail_size(
@@ -1257,7 +1230,6 @@ def load_saved_workspace(
                 parameter_section_states = data["parameter_section_states"]
             main_window.apply_parameter_section_states(parameter_section_states)
             filter_actions.filter_target_videos(main_window)
-            list_view_actions.load_target_webcams(main_window)
 
             # restore dock layout if it was saved
             dock_state_str = window_state.get("dock_state", data.get("dock_state", ""))
@@ -1320,12 +1292,6 @@ def save_current_workspace(
         "input_faces": main_window.panel_visibility_state.get("input_faces", True),
         "faces": main_window.panel_visibility_state.get("faces", True),
         "parameters": main_window.panel_visibility_state.get("parameters", True),
-        "filterImagesCheckBox": main_window.targetVideosFilterImagesCheckBox.isChecked(),
-        "filterVideosCheckBox": main_window.targetVideosFilterVideosCheckBox.isChecked(),
-        "filterWebcamsCheckBox": main_window.targetVideosFilterWebcamsCheckBox.isChecked(),
-        "targetVideosFilterMenuExpanded": (
-            main_window.targetVideosFilterMenuButton.isChecked()
-        ),
         "face_thumbnail_size": (
             "small"
             if getattr(
@@ -1361,9 +1327,6 @@ def save_current_workspace(
                 "media_path": target_media.media_path,
                 "file_type": target_media.file_type,
                 "media_id": media_id,
-                "is_webcam": target_media.is_webcam,
-                "webcam_index": target_media.webcam_index,
-                "webcam_backend": target_media.webcam_backend,
             }
         )
 

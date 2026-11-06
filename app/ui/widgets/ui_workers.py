@@ -38,7 +38,6 @@ class TargetMediaLoaderWorker(qtc.QThread):
         media_ids=None,
         sort_files_list_by_name=True,
         metadata_enabled=None,
-        webcam_mode=False,
         parent=None,
     ):
         super().__init__(parent)
@@ -54,10 +53,6 @@ class TargetMediaLoaderWorker(qtc.QThread):
             filter_button.isChecked() if filter_button is not None else False
         )
 
-        # Check if the search text box contains active text
-        search_box = getattr(main_window, "targetVideosSearchBox", None)
-        search_text_active = bool(search_box.text().strip()) if search_box else False
-
         sort_needs_metadata = target_videos_list_actions.current_sort_needs_metadata(
             main_window
         )
@@ -65,7 +60,7 @@ class TargetMediaLoaderWorker(qtc.QThread):
         # Evaluate metadata requirement including the search text state
         if metadata_enabled is None:
             metadata_enabled = (
-                filter_panel_open or search_text_active or sort_needs_metadata
+                filter_panel_open or sort_needs_metadata
             )
 
         self.metadata_enabled = bool(metadata_enabled)
@@ -73,11 +68,9 @@ class TargetMediaLoaderWorker(qtc.QThread):
         print(
             f"[INFO] TargetMediaLoaderWorker initialized. Metadata extraction: "
             f"{self.metadata_enabled} (Filter panel open: {filter_panel_open}, "
-            f"Search active: {search_text_active}, "
             f"Sorting requires metadata: {sort_needs_metadata})"
         )
 
-        self.webcam_mode = webcam_mode
         self._running = True  # Flag to control the running state
         self.control_snapshot = (
             main_window.control.copy() if getattr(main_window, "control", None) else {}
@@ -88,8 +81,6 @@ class TargetMediaLoaderWorker(qtc.QThread):
             self.load_videos_and_images_from_folder(self.folder_name)
         if self.files_list:
             self.load_videos_and_images_from_files_list(self.files_list)
-        if self.webcam_mode:
-            self.load_webcams()
         self.finished.emit()
 
     def _iter_sorted_recursive_media_files(self, folder_name: str):
@@ -209,38 +200,6 @@ class TargetMediaLoaderWorker(qtc.QThread):
                 if result:
                     # Thread-safe signal emission to the main GUI thread
                     self.thumbnail_ready.emit(*result)
-
-    def load_webcams(self):
-        self.main_window.placeholder_update_signal.emit(
-            self.main_window.targetVideosList, True
-        )
-        camera_backend = CAMERA_BACKENDS[
-            self.control_snapshot.get("WebcamBackendSelection", "DirectShow")
-        ]
-        max_no = int(self.control_snapshot.get("WebcamMaxNoSelection", 1))
-
-        for i in range(max_no):
-            try:
-                q_image = common_widget_actions.extract_frame_as_image(
-                    self.main_window,
-                    media_file_path=f"Webcam {i}",
-                    file_type="webcam",
-                    webcam_index=i,
-                    webcam_backend=camera_backend,
-                )
-                media_id = str(uuid.uuid1().int)
-
-                if q_image:
-                    # Emit the signal to update GUI
-                    self.webcam_thumbnail_ready.emit(
-                        f"Webcam {i}", q_image, "webcam", media_id, i, camera_backend
-                    )
-            except Exception:
-                traceback.print_exc()
-
-        self.main_window.placeholder_update_signal.emit(
-            self.main_window.targetVideosList, False
-        )
 
     def stop(self):
         # Stop the thread by setting the running flag to False.
@@ -604,16 +563,12 @@ class FilterWorker(qtc.QThread):
             self.filter_merged_embeddings()
 
     def filter_target_videos(self):
-        # Operates only on pre-captured plain Python data — no Qt widget access.
-        search_text = self.search_text
         include_file_types = self.include_file_types
 
         min_width, min_height = self.min_image_size
 
         visible_indices = []
         for index, media_path, file_type, width, height in self.items_snapshot:
-            if search_text and search_text not in media_path.lower():
-                continue
             if file_type not in include_file_types:
                 continue
             # Items whose dimensions are unknown (webcams) are never filtered out

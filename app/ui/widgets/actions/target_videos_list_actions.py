@@ -33,11 +33,6 @@ def _set_layout_widgets_visible(layout: QtWidgets.QLayout, checked: bool) -> Non
             _set_layout_widgets_visible(child_layout, checked)
 
 
-def update_target_videos_search_reset(main_window: "MainWindow", text: str) -> None:
-    """Only offer the reset button while there is something to reset."""
-    main_window.targetVideosSearchResetButton.setEnabled(bool(text and text.strip()))
-
-
 def toggle_target_video_filters_sorting(main_window: "MainWindow") -> None:
     checked = main_window.targetVideosFilterMenuButton.isChecked()
     _set_layout_widgets_visible(main_window.horizontalLayout_9a, checked)

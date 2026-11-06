@@ -220,20 +220,6 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
         # Set by the "Quit without Saving" action so closeEvent skips the autosave.
         self.quit_without_saving = False
 
-        self._initialize_target_videos_dimension_ranges()
-
-    def _initialize_target_videos_dimension_ranges(self):
-        """Range the minimum width/height filters from 0 up to 8K UHD (7680x4320)."""
-        max_width, max_height = 7680, 4320
-
-        self.targetVideosWidthSlider.setRange(0, max_width)
-        self.targetVideosWidthSlider.setSingleStep(max_width // 100)
-        self.targetVideosWidthSpinBox.setRange(0, max_width)
-
-        self.targetVideosHeightSlider.setRange(0, max_height)
-        self.targetVideosHeightSlider.setSingleStep(max_height // 100)
-        self.targetVideosHeightSpinBox.setRange(0, max_height)
-
     def initialize_widgets(self):
         # Initialize QListWidget for target media
         self.targetVideosList.setFlow(QtWidgets.QListWidget.LeftToRight)
@@ -743,20 +729,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
         self.menuFile.addAction(self.actionQuit)
 
     def _initialize_target_videos_list_widgets(self):
-        """Wire up the target media search box, sort controls and filters."""
-        # Search
-        self.targetVideosSearchBox.textChanged.connect(
-            partial(filter_actions.filter_target_videos, self)
-        )
-        self.targetVideosSearchBox.textChanged.connect(
-            partial(target_videos_list_actions.update_target_videos_search_reset, self)
-        )
-        self.targetVideosSearchResetButton.setEnabled(False)
-        self.targetVideosSearchResetButton.clicked.connect(
-            self.targetVideosSearchBox.clear
-        )
-
-        # Sorting
+        """Wire up the target media sort controls."""
         self.targetVideosSortComboBox.clear()
         for item_text, item_sort_mode in sortable_widgets.initialize_combobox_items:
             self.targetVideosSortComboBox.addItem(item_text, item_sort_mode)
@@ -770,55 +743,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
         self.sortTargetVideosDirectionButton.toggled.connect(
             partial(target_videos_list_actions.sort_target_videos, self)
         )
-
-        # Filters: the button now toggles the filter row instead of opening a menu
-        self.targetVideosFilterMenuButton.setCheckable(True)
-        self.targetVideosFilterMenuButton.setChecked(False)
-        self.targetVideosFilterMenuButton.clicked.connect(
-            partial(
-                target_videos_list_actions.toggle_target_video_filters_sorting, self
-            )
-        )
-        target_videos_list_actions.toggle_target_video_filters_sorting(self)
-
-        for checkbox in (
-            self.targetVideosFilterImagesCheckBox,
-            self.targetVideosFilterVideosCheckBox,
-            self.targetVideosFilterWebcamsCheckBox,
-        ):
-            checkbox.toggled.connect(partial(filter_actions.filter_target_videos, self))
-        self.targetVideosFilterWebcamsCheckBox.toggled.connect(
-            partial(list_view_actions.load_target_webcams, self)
-        )
-
-        # Minimum dimension filters: keep each slider and its spin box in step
-        for slider, spinbox in (
-            (self.targetVideosWidthSlider, self.targetVideosWidthSpinBox),
-            (self.targetVideosHeightSlider, self.targetVideosHeightSpinBox),
-        ):
-            slider.valueChanged.connect(
-                partial(target_videos_list_actions.sort_target_videos, self)
-            )
-            slider.valueChanged.connect(
-                partial(
-                    target_videos_list_actions._set_value_blocking_signals,
-                    slider,
-                    spinbox,
-                )
-            )
-            spinbox.valueChanged.connect(
-                partial(
-                    target_videos_list_actions._set_value_blocking_signals,
-                    spinbox,
-                    slider,
-                )
-            )
-            # The sync above blocks the slider's signals, so the spin box has to
-            # ask for the re-filter itself.
-            spinbox.valueChanged.connect(
-                partial(target_videos_list_actions.sort_target_videos, self)
-            )
-
+        
     def update_denoiser_controls_visibility_for_pass(
         self, pass_suffix: str, current_mode_text: str
     ):

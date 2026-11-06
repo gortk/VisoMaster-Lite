@@ -1,0 +1,14 @@
+VisoMaster crash report — 2026-11-06T14:44:56.289977
+======================================================================
+Python:   3.12.10 (tags/v3.12.10:0cc8128, Apr  8 2025, 12:21:36) [MSC v.1943 64 bit (AMD64)]
+Platform: Windows-10-10.0.19045-SP0
+======================================================================
+
+Traceback (most recent call last):
+  File "V:\VisoMaster-Lite\VisoMaster-Lite\main.py", line 88, in <module>
+    _run_app()
+  File "V:\VisoMaster-Lite\VisoMaster-Lite\main.py", line 51, in _run_app
+    from app.ui import main_ui
+  File "V:\VisoMaster-Lite\VisoMaster-Lite\app\ui\main_ui.py", line 10, in <module>
+    from app.ui.core.main_window import Ui_MainWindow
+ImportError: cannot import name 'Ui_MainWindow' from 'app.ui.core.main_window' (V:\VisoMaster-Lite\VisoMaster-Lite\app\ui\core\main_window.py)

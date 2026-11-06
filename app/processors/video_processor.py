@@ -3513,38 +3513,18 @@ class VideoProcessor(QObject):
             f"[INFO] Init Webcam: Device={webcam_index}, Backend={backend_name}, Target={target_width}x{target_height} @ {target_fps}fps"
         )
 
-        # 2. Initialize VideoCapture with the selected Backend (Prevent Race Condition)
-        reinitialize_needed = True
+        # 2. Initialize VideoCapture with the selected Backend
+        if self.media_capture:
+            misc_helpers.release_capture(self.media_capture)
+            self.media_capture = None
+            # CRITICAL: Wait for OS driver hardware lock to fully release
+            time.sleep(0.5)
 
-        # Determine if we can safely reuse the existing capture
-        if self.media_capture and self.media_capture.isOpened():
-            selected_btn = getattr(self.main_window, "selected_video_button", None)
-            from app.ui.widgets import widget_components
-
-            if isinstance(
-                selected_btn, widget_components.TargetMediaCardButton
-            ) and getattr(selected_btn, "is_webcam", False):
-                if (
-                    selected_btn.webcam_index == webcam_index
-                    and selected_btn.webcam_backend == backend_id
-                ):
-                    reinitialize_needed = False
-                    print(
-                        "[INFO] Reusing existing webcam capture to prevent hardware lock issues."
-                    )
-
-        if reinitialize_needed:
-            if self.media_capture:
-                misc_helpers.release_capture(self.media_capture)
-                self.media_capture = None
-                # CRITICAL: Wait for OS driver hardware lock to fully release
-                time.sleep(0.5)
-
-            try:
-                self.media_capture = cv2.VideoCapture(webcam_index, backend_id)
-            except Exception as e:
-                print(f"[ERROR] Failed to init webcam with backend {backend_name}: {e}")
-                self.media_capture = cv2.VideoCapture(webcam_index)
+        try:
+            self.media_capture = cv2.VideoCapture(webcam_index, backend_id)
+        except Exception as e:
+            print(f"[ERROR] Failed to init webcam with backend {backend_name}: {e}")
+            self.media_capture = cv2.VideoCapture(webcam_index)
 
         if not (self.media_capture and self.media_capture.isOpened()):
             print("[ERROR] Unable to open webcam source.")

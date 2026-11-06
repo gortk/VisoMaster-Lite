@@ -240,33 +240,6 @@ def add_media_thumbnail_to_target_videos_list(
         main_window, media_path, q_image, file_type, media_id, metadata
     )
 
-
-# Functions to add Buttons with thumbnail for selecting videos/images and faces
-@QtCore.Slot(str, QtGui.QImage, str, str, int, int)
-def add_webcam_thumbnail_to_target_videos_list(
-    main_window: "MainWindow",
-    media_path,
-    q_image,
-    file_type,
-    media_id,
-    webcam_index,
-    webcam_backend,
-):
-    add_media_thumbnail_button(
-        main_window,
-        widget_components.TargetMediaCardButton,
-        main_window.targetVideosList,
-        main_window.target_videos,
-        q_image,
-        media_path=media_path,
-        file_type=file_type,
-        media_id=media_id,
-        is_webcam=True,
-        webcam_index=webcam_index,
-        webcam_backend=webcam_backend,
-    )
-
-
 @QtCore.Slot()
 def add_media_thumbnail_to_target_faces_list(
     main_window: "MainWindow", cropped_face, embedding_store, image_data, face_id
@@ -313,14 +286,6 @@ def add_media_thumbnail_button(
             kwargs.get("file_type"),
             kwargs.get("media_id"),
         ]
-        if kwargs.get("is_webcam"):
-            constructor_args.extend(
-                [
-                    kwargs.get("is_webcam"),
-                    kwargs.get("webcam_index"),
-                    kwargs.get("webcam_backend"),
-                ]
-            )
     elif buttonClass in (
         widget_components.TargetFaceCardButton,
         widget_components.InputFaceCardButton,
@@ -402,8 +367,7 @@ def _apply_target_media_item_data(
     list_item.setFileType(button.file_type or "")
 
     media_path = button.media_path
-    # Webcams have no file on disk, so they only carry their file type.
-    if media_path and not button.is_webcam:
+    if media_path:
         list_item.setFileInfo(QtCore.QFileInfo(str(media_path)))
 
     if metadata is not None:
@@ -516,7 +480,6 @@ def initialize_media_list_widgets(main_window: "MainWindow"):
         listWidget.setMovement(QtWidgets.QListView.Static)
         listWidget.setResizeMode(QtWidgets.QListView.Adjust)
         listWidget.setUniformItemSizes(True)
-        # MODIFIED: Both target and input media now use explicit Python queue batchers.
         if listWidget in (main_window.targetVideosList, main_window.inputFacesList):
             listWidget.setLayoutMode(QtWidgets.QListView.SinglePass)
         else:
@@ -823,10 +786,6 @@ def clear_all_target_media(main_window: "MainWindow") -> bool:
     if ignored is None:
         ignored = set()
         main_window._target_folder_ignored_paths = ignored
-    for p in _existing_target_media_paths(main_window):
-        np = _normalize_media_path(p)
-        seen.add(np)
-        ignored.add(np)
 
     # Remove items WHILE selected_video_button is still set so deselect
     # clears the preview for the active item
@@ -938,8 +897,7 @@ def delete_all_target_media_to_trash(main_window: "MainWindow") -> bool:
     buttons = [
         b
         for b in (main_window.target_videos or {}).values()
-        if not getattr(b, "is_webcam", False)
-        and getattr(b, "media_path", None)
+        if getattr(b, "media_path", None)
         and os.path.exists(b.media_path)
     ]
     if not buttons:
@@ -972,8 +930,7 @@ def delete_all_target_media_to_trash(main_window: "MainWindow") -> bool:
 
     for button in list(main_window.target_videos.values()):
         path = getattr(button, "media_path", None)
-        is_webcam = getattr(button, "is_webcam", False)
-        if path and not is_webcam and os.path.exists(path):
+        if path and os.path.exists(path):
             try:
                 send2trash(path)
                 print(f"[INFO] {path} has been sent to the trash.")
@@ -1020,8 +977,7 @@ def _build_panel_context_menu(
 
         delete_action = QtGui.QAction("⚠ Delete all files to recycle bin", menu)
         has_files = any(
-            not getattr(b, "is_webcam", False)
-            and getattr(b, "media_path", None)
+            getattr(b, "media_path", None)
             and os.path.exists(b.media_path)
             for b in (main_window.target_videos or {}).values()
         )
@@ -1120,7 +1076,9 @@ def set_up_list_widget_placeholder(
         "<html><body style='text-align:center;'>"
         "<p>Drop Files</p>"
         "<p><b>or</b></p>"
-        "<p>Click here to Select a Folder</p>"
+        "<p>Click here</p>"
+        "<p>to Select</p>"
+        "<p>a Folder</p>"
         "</body></html>"
     )
     # placeholder_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
@@ -1559,7 +1517,7 @@ def _prune_missing_auto_loaded_target_media(
                 if callable(item_widget_fn) and item is not None
                 else None
             )
-            if button is None or getattr(button, "is_webcam", False):
+            if button is None:
                 continue
             media_path = getattr(button, "media_path", None)
             if not media_path:
@@ -1762,7 +1720,7 @@ def _remove_subfolder_target_media(main_window: "MainWindow", folder: str) -> No
                 if callable(item_widget_fn) and item is not None
                 else None
             )
-            if button is None or getattr(button, "is_webcam", False):
+            if button is None:
                 continue
             media_path = getattr(button, "media_path", None)
             if not media_path:
@@ -1821,7 +1779,7 @@ def _clear_auto_loaded_target_media(main_window: "MainWindow") -> None:
             pass
 
     selected = getattr(main_window, "selected_video_button", None)
-    if selected is not None and not getattr(selected, "is_webcam", False):
+    if selected is not None:
         _reset_selected_target_video_if_removed(main_window)
 
     list_widget = getattr(main_window, "targetVideosList", None)
@@ -1846,18 +1804,17 @@ def _clear_auto_loaded_target_media(main_window: "MainWindow") -> None:
                 if callable(item_widget_fn) and item is not None
                 else None
             )
-            if button is not None and getattr(button, "is_webcam", False):
+            if button is None:
                 continue
-            media_id = getattr(button, "media_id", None) if button else None
+            media_id = getattr(button, "media_id", None)
             take_fn(i)
             target_videos = getattr(main_window, "target_videos", None)
             if media_id is not None and isinstance(target_videos, dict):
                 target_videos.pop(media_id, None)
-            if button is not None:
-                try:
-                    button.deleteLater()
-                except Exception:
-                    pass
+            try:
+                button.deleteLater()
+            except Exception:
+                pass
     finally:
         if callable(updates_fn):
             updates_fn(True)

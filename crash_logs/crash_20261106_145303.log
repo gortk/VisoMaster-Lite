@@ -1,0 +1,21 @@
+VisoMaster crash report — 2026-11-06T14:53:03.745978
+======================================================================
+Python:   3.12.10 (tags/v3.12.10:0cc8128, Apr  8 2025, 12:21:36) [MSC v.1943 64 bit (AMD64)]
+Platform: Windows-10-10.0.19045-SP0
+======================================================================
+
+Traceback (most recent call last):
+  File "V:\VisoMaster-Lite\VisoMaster-Lite\main.py", line 88, in <module>
+    _run_app()
+  File "V:\VisoMaster-Lite\VisoMaster-Lite\main.py", line 78, in _run_app
+    window = main_ui.MainWindow(gpu_id=args.gpu_id)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "V:\VisoMaster-Lite\VisoMaster-Lite\app\ui\main_ui.py", line 959, in __init__
+    self.initialize_widgets()
+  File "V:\VisoMaster-Lite\VisoMaster-Lite\app\ui\main_ui.py", line 265, in initialize_widgets
+    self._initialize_target_videos_list_widgets()  # search, sorting, filters
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "V:\VisoMaster-Lite\VisoMaster-Lite\app\ui\main_ui.py", line 748, in _initialize_target_videos_list_widgets
+    self.targetVideosFilterMenuButton.setCheckable(True)
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AttributeError: 'MainWindow' object has no attribute 'targetVideosFilterMenuButton'

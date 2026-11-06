@@ -200,9 +200,6 @@ class TargetMediaCardButton(CardButton):
         media_path: str,
         file_type: str,
         media_id: str,
-        is_webcam=False,
-        webcam_index=-1,
-        webcam_backend=-1,
         *args,
         **kwargs,
     ):
@@ -210,9 +207,6 @@ class TargetMediaCardButton(CardButton):
         self.media_id = media_id
         self.file_type = file_type
         self.media_path = os.path.normpath(media_path)
-        self.is_webcam = is_webcam
-        self.webcam_index = webcam_index
-        self.webcam_backend = webcam_backend
         self.media_capture: cv2.VideoCapture | bool = False
         self._thumbnail_pixmap = QtGui.QPixmap()
         self.setCheckable(True)
@@ -416,32 +410,6 @@ class TargetMediaCardButton(CardButton):
             max_frames_number = 0  # For an image, there is only one "frame"
             main_window.video_processor.max_frame_number = max_frames_number
 
-        elif self.file_type == "webcam":
-            # MODIFICATION: Set rotation to 0 for webcam
-            main_window.video_processor.media_rotation = 0
-            res_width, res_height = self.main_window.control[
-                "WebcamMaxResSelection"
-            ].split("x")
-
-            media_capture = cv2.VideoCapture(self.webcam_index, self.webcam_backend)
-
-            try:
-                fourcc = cv2.VideoWriter_fourcc(*"MJPG")
-                media_capture.set(cv2.CAP_PROP_FOURCC, fourcc)
-            except Exception:
-                pass
-
-            media_capture.set(cv2.CAP_PROP_FRAME_WIDTH, int(res_width))
-            media_capture.set(cv2.CAP_PROP_FRAME_HEIGHT, int(res_height))
-            max_frames_number = 999999
-            _, frame = misc_helpers.read_frame(media_capture, 0)  # 0 for webcam
-            main_window.video_processor.media_capture = media_capture
-            self.media_capture = media_capture
-            main_window.video_processor.fps = media_capture.get(cv2.CAP_PROP_FPS)
-            main_window.video_processor.max_frame_number = max_frames_number
-
-        if frame is not None:
-            main_window.scene.clear()
             if self.file_type == "video":
                 # restore initial video position after reading. == 0
                 media_capture.set(cv2.CAP_PROP_POS_FRAMES, 0)
@@ -498,24 +466,10 @@ class TargetMediaCardButton(CardButton):
             layout_actions.fit_image_to_view_onchange(main_window)
 
         if (
-            main_window.control["SendVirtCamFramesEnableToggle"]
-            and self.file_type != "image"
+            main_window.control.get("SendVirtCamFramesEnableToggle", False)
+            and self.file_type == "video"
         ):
-            # Re-initialize virtualcam to reset its dimensions with that of the new video
             main_window.video_processor.enable_virtualcam()
-
-        # --- AUTO-START WEBCAM FEED ---
-        # A webcam is a live sensor, so it should stream immediately without waiting for "Play".
-        if self.file_type == "webcam":
-            main_window.buttonMediaPlay.blockSignals(True)
-            main_window.buttonMediaPlay.setChecked(True)
-            main_window.buttonMediaPlay.blockSignals(False)
-            video_control_actions.set_play_button_icon_to_stop(main_window)
-
-            # Start the live stream immediately
-            main_window.video_processor.process_webcam()
-
-        # list_view_actions.find_target_faces(main_window)
 
     def deselect_currently_selected_video(self, main_window):
         if video_control_actions.block_if_issue_scan_active(
@@ -677,8 +631,7 @@ class TargetMediaCardButton(CardButton):
                 bool(self.main_window.target_videos) and not scan_active
             )
             has_files = any(
-                not getattr(b, "is_webcam", False)
-                and getattr(b, "media_path", None)
+                getattr(b, "media_path", None)
                 and os.path.exists(b.media_path)
                 for b in (self.main_window.target_videos or {}).values()
             )

@@ -1,0 +1,20 @@
+VisoMaster crash report — 2026-11-06T14:51:54.122076
+======================================================================
+Python:   3.12.10 (tags/v3.12.10:0cc8128, Apr  8 2025, 12:21:36) [MSC v.1943 64 bit (AMD64)]
+Platform: Windows-10-10.0.19045-SP0
+======================================================================
+
+Traceback (most recent call last):
+  File "V:\VisoMaster-Lite\VisoMaster-Lite\main.py", line 88, in <module>
+    _run_app()
+  File "V:\VisoMaster-Lite\VisoMaster-Lite\main.py", line 78, in _run_app
+    window = main_ui.MainWindow(gpu_id=args.gpu_id)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "V:\VisoMaster-Lite\VisoMaster-Lite\app\ui\main_ui.py", line 971, in __init__
+    self.initialize_variables()
+  File "V:\VisoMaster-Lite\VisoMaster-Lite\app\ui\main_ui.py", line 223, in initialize_variables
+    self._initialize_target_videos_dimension_ranges()
+  File "V:\VisoMaster-Lite\VisoMaster-Lite\app\ui\main_ui.py", line 229, in _initialize_target_videos_dimension_ranges
+    self.targetVideosWidthSlider.setRange(0, max_width)
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AttributeError: 'MainWindow' object has no attribute 'targetVideosWidthSlider'
