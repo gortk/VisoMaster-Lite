@@ -1574,68 +1574,6 @@ def delete_all_markers(main_window: "MainWindow"):
     main_window.dropped_frames.clear()
     update_drop_frame_button_label(main_window)
 
-
-def _restore_window_base_mode(
-    main_window: "MainWindow",
-    *,
-    restore_to_fullscreen: bool,
-    restore_to_maximized: bool,
-    restore_geometry=None,
-):
-    if restore_to_fullscreen:
-        try:
-            main_window.setWindowState(QtCore.Qt.WindowState.WindowFullScreen)
-        except Exception:
-            main_window.showFullScreen()
-        main_window.is_full_screen = True
-        return
-
-    if restore_to_maximized:
-        main_window.showMaximized()
-    else:
-        main_window.showNormal()
-        if restore_geometry is not None:
-            main_window.setGeometry(restore_geometry)
-    main_window.is_full_screen = False
-
-
-def view_fullscreen(main_window: "MainWindow"):
-    """Toggle fullscreen without changing theatre mode."""
-
-    if main_window.isFullScreen():
-        restore_to_maximized = bool(
-            getattr(main_window, "_fullscreen_restore_was_maximized", False)
-        )
-        restore_geometry = getattr(main_window, "_fullscreen_restore_geometry", None)
-        _restore_window_base_mode(
-            main_window,
-            restore_to_fullscreen=False,
-            restore_to_maximized=restore_to_maximized,
-            restore_geometry=restore_geometry,
-        )
-        main_window._fullscreen_restore_was_maximized = False
-        main_window._fullscreen_restore_geometry = None
-    else:
-        was_maximized = main_window.isMaximized()
-        main_window._fullscreen_restore_was_maximized = was_maximized
-        main_window._fullscreen_restore_geometry = (
-            main_window.normalGeometry() if was_maximized else main_window.geometry()
-        )
-        main_window.showFullScreen()  # Enter full-screen mode
-        main_window.is_full_screen = True
-
-    sync_theatre_snapshot = getattr(
-        main_window, "_sync_theatre_base_window_snapshot", None
-    )
-    if callable(sync_theatre_snapshot):
-        sync_theatre_snapshot()
-
-    sync_actions = getattr(main_window, "_sync_viewer_menu_actions", None)
-
-    if callable(sync_actions):
-        sync_actions()
-
-
 def fit_view_to_current_image(main_window: "MainWindow"):
     layout_actions.fit_image_to_view_onchange(main_window)
 
@@ -1659,123 +1597,44 @@ def zoom_current_image_100(main_window: "MainWindow"):
     view.last_scale_factor = 1.0
 
 
-def show_graphics_view_context_menu(
-    main_window: "MainWindow", global_pos: QtCore.QPoint
-):
-    menu = QtWidgets.QMenu(main_window.graphicsViewFrame)
-    viewer_mode_actions_enabled = bool(
-        getattr(main_window, "viewer_mode_actions_enabled", True)
-    )
-    fit_action = menu.addAction("Fit to View")
-    zoom_100_action = menu.addAction("100% Zoom")
-    menu.addSeparator()
-    fullscreen_action = menu.addAction("Fullscreen")
-    fullscreen_action.setCheckable(True)
-    fullscreen_action.setChecked(bool(main_window._is_fullscreen_menu_active()))
-    theatre_action = menu.addAction("Theatre Mode")
-    theatre_action.setCheckable(True)
-    theatre_action.setChecked(bool(getattr(main_window, "is_theatre_mode", False)))
-    menu.addSeparator()
-    face_compare_action = menu.addAction("Face Compare")
-    face_compare_action.setCheckable(True)
-    face_compare_action.setChecked(bool(main_window.view_face_compare_enabled))
-    face_compare_action.setEnabled(viewer_mode_actions_enabled)
-    menu.addSeparator()
-    current_mask_value = main_window._get_current_mask_show_value()
-    mask_actions = {}
-    for option in main_window._get_mask_show_options():
-        action = menu.addAction(main_window._mask_show_context_menu_label(option))
-        action.setCheckable(True)
-        action.setChecked(
-            bool(main_window.view_face_mask_enabled) and option == current_mask_value
-        )
-        action.setEnabled(viewer_mode_actions_enabled)
-        mask_actions[action] = option
-    menu.addSeparator()
-    save_action = menu.addAction("Save Image")
-    selected_action = menu.exec(global_pos)
-    if selected_action is fit_action:
-        fit_view_to_current_image(main_window)
-    elif selected_action is zoom_100_action:
-        zoom_current_image_100(main_window)
-    elif selected_action is fullscreen_action:
-        view_fullscreen(main_window)
-        main_window._sync_viewer_menu_actions()
-    elif selected_action is theatre_action:
-        QtCore.QTimer.singleShot(
-            0,
-            lambda: _run_context_menu_theatre_toggle(main_window),
-        )
-    elif selected_action is face_compare_action:
-        main_window._set_compare_mode("compare", face_compare_action.isChecked())
-        main_window._sync_viewer_menu_actions()
-    elif selected_action is save_action:
-        save_current_frame_to_file(main_window)
-    elif selected_action in mask_actions:
-        selected_value = mask_actions[selected_action]
-        main_window._handle_viewer_mask_action(
-            selected_value, selected_action.isChecked()
-        )
-
-
 def enable_zoom_and_pan(
     main_window: "MainWindow", view: QtWidgets.QGraphicsView
 ) -> None:
     """
-    Attaches mouse-wheel zoom, middle-click pan, and context-menu behaviour to a
-    QGraphicsView instance.
+    Attaches mouse-wheel zoom, right-click drag pan, and Shift+wheel embedding
+    cycling to a QGraphicsView.
 
-    Monkey-patches zoom, reset_zoom, wheelEvent, mousePressEvent, mouseMoveEvent,
-    mouseReleaseEvent, and contextMenuEvent directly onto the view object so no
-    subclass is required.
+    Right-click is repurposed for panning (no context menu is shown).
     """
     SCALE_FACTOR: float = 1.1
-    view.zoom_value = 0  # Track zoom level
-    view.last_scale_factor = 1.0  # Track the last scale factor (1.0 = no scaling)
-    view.is_panning = False  # Track whether panning is active
-    view.pan_start_pos = QtCore.QPoint()  # Store the initial mouse position for panning
+    view.zoom_value = 0
+    view.last_scale_factor = 1.0
+    view.is_panning = False
+    view.pan_start_pos = QtCore.QPoint()
+    view.setContextMenuPolicy(QtCore.Qt.ContextMenuPolicy.NoContextMenu)
 
     def zoom(self: QtWidgets.QGraphicsView, step: int | bool = False) -> None:
-        """Zoom in or out by a step."""
         if not step:
             factor = self.last_scale_factor
         else:
             self.zoom_value += int(step)
             factor = SCALE_FACTOR ** int(step)
-            self.last_scale_factor *= factor  # Update the last scale factor
-
+            self.last_scale_factor *= factor
         if factor > 0:
             self.scale(factor, factor)
 
-    # SHIFT + MOUSE WHEEL EMBEDDING CYCLING
     def cycle_embedding(direction: int) -> bool:
-        """
-        Select the previous or next merged embedding.
-
-        direction:
-            -1 = previous embedding
-             1 = next embedding
-        """
         target_face_button = getattr(
-            main_window,
-            "cur_selected_target_face_button",
-            None,
+            main_window, "cur_selected_target_face_button", None
         )
-
-        # Embeddings are assigned to the currently selected target face.
         if target_face_button is None:
             return False
 
         embedding_buttons = [
             button
-            for button in getattr(
-                main_window,
-                "merged_embeddings",
-                {},
-            ).values()
+            for button in getattr(main_window, "merged_embeddings", {}).values()
             if button is not None and button.isEnabled()
         ]
-
         if not embedding_buttons:
             return False
 
@@ -1789,35 +1648,21 @@ def enable_zoom_and_pan(
             current_index = checked_indices[0]
             next_index = (current_index + direction) % len(embedding_buttons)
         else:
-            # When no embedding is active, start at the appropriate end.
             next_index = 0 if direction > 0 else len(embedding_buttons) - 1
 
         next_button = embedding_buttons[next_index]
 
-        # Deactivate the old embedding through its normal click handler.
-        # This allows VisoMaster to update its internal assignment data.
         for button in embedding_buttons:
             if button is not next_button and button.isChecked():
                 button.click()
 
-        # Activate the new embedding through its normal click handler.
         if not next_button.isChecked():
             next_button.click()
 
-        # KEEP ACTIVE EMBEDDING VISIBLE
-        embeddings_list = getattr(
-            main_window,
-            "inputEmbeddingsList",
-            None,
-        )
-        embedding_list_item = getattr(
-            next_button,
-            "list_item",
-            None,
-        )
+        embeddings_list = getattr(main_window, "inputEmbeddingsList", None)
+        embedding_list_item = getattr(next_button, "list_item", None)
 
         if embeddings_list is not None and embedding_list_item is not None:
-            # Run after the button click has finished updating the UI to prevent Race Conditions.
             QtCore.QTimer.singleShot(
                 0,
                 lambda: embeddings_list.scrollToItem(
@@ -1829,95 +1674,67 @@ def enable_zoom_and_pan(
         return True
 
     def wheelEvent(self: QtWidgets.QGraphicsView, event: QtGui.QWheelEvent) -> None:
-        """
-        Mouse wheel controls:
-        Wheel alone: Zoom the displayed video or image.
-        Shift + wheel: Change the selected embedding.
-        """
         delta = event.angleDelta().y()
-
         if delta == 0:
             event.ignore()
             return
 
         shift_held = bool(event.modifiers() & QtCore.Qt.KeyboardModifier.ShiftModifier)
-
         if shift_held:
-            # Wheel up selects the previous embedding.
-            # Wheel down selects the next embedding.
             direction = -1 if delta > 0 else 1
-
             if cycle_embedding(direction):
                 event.accept()
             else:
                 event.ignore()
             return
 
-        # Original mouse-wheel zoom behavior.
         zoom(self, delta // abs(delta))
         event.accept()
 
     def reset_zoom(self: QtWidgets.QGraphicsView) -> None:
-        """Resets the view transform so the scene content fits the viewport exactly."""
         fit_view_to_current_image(main_window)
 
     def mousePressEvent(
         self: QtWidgets.QGraphicsView, event: QtGui.QMouseEvent
     ) -> None:
-        """Handle mouse press event for panning."""
-        if event.button() == QtCore.Qt.MouseButton.MiddleButton:
+        if event.button() == QtCore.Qt.MouseButton.RightButton:
             self.is_panning = True
-            self.pan_start_pos = event.pos()  # Store the initial mouse position
-            self.setCursor(
-                QtCore.Qt.CursorShape.ClosedHandCursor
-            )  # Change cursor to indicate panning
+            self.pan_start_pos = event.pos()
+            self.setCursor(QtCore.Qt.CursorShape.ClosedHandCursor)
+            event.accept()
         else:
-            # Explicitly call the base class implementation
             QtWidgets.QGraphicsView.mousePressEvent(self, event)
 
     def mouseMoveEvent(self: QtWidgets.QGraphicsView, event: QtGui.QMouseEvent) -> None:
-        """Handle mouse move event for panning."""
         if self.is_panning:
-            # Calculate the distance moved
             delta = event.pos() - self.pan_start_pos
-            self.pan_start_pos = event.pos()  # Update the start position
+            self.pan_start_pos = event.pos()
 
-            # Translate the view safely
             h_bar = self.horizontalScrollBar()
             v_bar = self.verticalScrollBar()
             h_bar.setValue(h_bar.value() - delta.x())
             v_bar.setValue(v_bar.value() - delta.y())
+            event.accept()
         else:
-            # Explicitly call the base class implementation
             QtWidgets.QGraphicsView.mouseMoveEvent(self, event)
 
     def mouseReleaseEvent(
         self: QtWidgets.QGraphicsView, event: QtGui.QMouseEvent
     ) -> None:
-        """Handle mouse release event for panning."""
-        if event.button() == QtCore.Qt.MouseButton.MiddleButton:
+        if event.button() == QtCore.Qt.MouseButton.RightButton:
             self.is_panning = False
-            self.setCursor(QtCore.Qt.CursorShape.ArrowCursor)  # Reset the cursor
+            self.setCursor(QtCore.Qt.CursorShape.ArrowCursor)
+            event.accept()
         else:
-            # Explicitly call the base class implementation
             QtWidgets.QGraphicsView.mouseReleaseEvent(self, event)
 
-    def contextMenuEvent(
-        self: QtWidgets.QGraphicsView, event: QtGui.QContextMenuEvent
-    ) -> None:
-        show_graphics_view_context_menu(main_window, event.globalPos())
-        event.accept()
-
-    # Attach methods to the view via partial (Monkey-patching)
     view.zoom = partial(zoom, view)
     view.reset_zoom = partial(reset_zoom, view)
     view.wheelEvent = partial(wheelEvent, view)
     view.mousePressEvent = partial(mousePressEvent, view)
     view.mouseMoveEvent = partial(mouseMoveEvent, view)
     view.mouseReleaseEvent = partial(mouseReleaseEvent, view)
-    view.contextMenuEvent = partial(contextMenuEvent, view)
 
-    # Set anchors for better interaction
     view.setTransformationAnchor(
         QtWidgets.QGraphicsView.ViewportAnchor.AnchorUnderMouse
     )
@@ -1987,14 +1804,11 @@ def record_video(main_window: "MainWindow", checked: bool):
       - Multi-segment style (job markers set): records each marker-pair segment.
       - Batch processing: forces recording from frame 0.
 
-    When *checked* is False: prompts the user to confirm stopping (unless triggered
-    programmatically by the Job Manager) and finalises the current recording.
+    When *checked* is False: prompts the user to confirm stopping and finalises
+    the current recording.
     """
     video_processor = main_window.video_processor
-    # Determine if this record action was initiated by the Job Manager
-    job_mgr_flag = getattr(main_window, "job_manager_initiated_record", False)
 
-    # Check if Batch processing
     is_batch_processing = getattr(main_window, "is_batch_processing", False)
 
     if video_processor.file_type not in ["video", "image"]:
@@ -2025,7 +1839,7 @@ def record_video(main_window: "MainWindow", checked: bool):
                 "Please select an Output folder before recording!",
                 main_window,
             )
-            main_window.buttonMediaRecord.setChecked(False)  # Uncheck the button
+            main_window.buttonMediaRecord.setChecked(False)
             return
         if not misc_helpers.is_ffmpeg_in_path():
             common_widget_actions.create_and_show_messagebox(
@@ -2034,19 +1848,14 @@ def record_video(main_window: "MainWindow", checked: bool):
                 "FFMPEG was not found in your system. Check installation!",
                 main_window,
             )
-            main_window.buttonMediaRecord.setChecked(False)  # Uncheck the button
+            main_window.buttonMediaRecord.setChecked(False)
             return
 
         marker_pairs = main_window.job_marker_pairs
 
-        # If no Markers OR Batch processing, use default style recording
         if not marker_pairs or (
             is_batch_processing and video_processor.file_type == "video"
         ):
-            # --- Default Recording Style ---
-
-            # If not Batch processing, use slider position
-            # If Batch processing, use frame position 0
             current_frame = 0
             if not is_batch_processing:
                 current_frame = main_window.videoSeekSlider.value()
@@ -2059,7 +1868,6 @@ def record_video(main_window: "MainWindow", checked: bool):
                 main_window.buttonMediaRecord.setChecked(False)
                 return
 
-            # Check start position (0 for batch, slider for manual)
             if current_frame >= max_frame:
                 common_widget_actions.create_and_show_messagebox(
                     main_window,
@@ -2069,17 +1877,15 @@ def record_video(main_window: "MainWindow", checked: bool):
                 )
                 main_window.buttonMediaRecord.setChecked(False)
                 return
-            # --- Proceed with Default Recording ---
+
             print(
                 "[INFO] Record button pressed: Starting default recording (full video or from slider)."
             )
             _disable_compare_preview_modes_for_recording(main_window)
             set_record_button_icon_to_stop(main_window)
-            # Disable play button during recording
             main_window.buttonMediaPlay.setEnabled(False)
-            video_processor.recording = True  # SET THE FLAG FOR DEFAULT RECORDING
+            video_processor.recording = True
 
-            # If batch process force slider to 0 so that process_video() begins at start.
             if is_batch_processing:
                 main_window.videoSeekSlider.blockSignals(True)
                 main_window.videoSeekSlider.setValue(0)
@@ -2088,10 +1894,8 @@ def record_video(main_window: "MainWindow", checked: bool):
                     "[INFO] Batch processing: Forcing video record to start from frame 0."
                 )
 
-            video_processor.process_video()  # CALL THE DEFAULT PROCESSOR
-
-        else:  # MARKERS ARE SET (and not in batch) -> Multi-Segment Recording Style
-            # --- Validate Marker Pairs ---
+            video_processor.process_video()
+        else:
             valid_pairs = []
             for i, pair in enumerate(marker_pairs):
                 if pair[1] is None:
@@ -2102,7 +1906,7 @@ def record_video(main_window: "MainWindow", checked: bool):
                         main_window,
                     )
                     main_window.buttonMediaRecord.setChecked(False)
-                    return  # Stop if invalid
+                    return
                 elif pair[0] >= pair[1]:
                     common_widget_actions.create_and_show_messagebox(
                         main_window,
@@ -2111,47 +1915,31 @@ def record_video(main_window: "MainWindow", checked: bool):
                         main_window,
                     )
                     main_window.buttonMediaRecord.setChecked(False)
-                    return  # Stop if invalid
+                    return
                 else:
-                    # Force cast to tuple of ints.
                     valid_pairs.append((int(pair[0]), int(pair[1])))
 
-            # Proceed if we have valid marker pairs
             if valid_pairs:
                 print(
                     f"[INFO] Record button pressed: Starting multi-segment recording for {len(valid_pairs)} segment(s)."
                 )
                 _disable_compare_preview_modes_for_recording(main_window)
                 set_record_button_icon_to_stop(main_window)
-                # Disable play button during segment recording
                 main_window.buttonMediaPlay.setEnabled(False)
-                is_job_context = job_mgr_flag
-                print(f"[INFO] Is job manager flag = {is_job_context}")
                 video_processor.start_multi_segment_recording(
-                    valid_pairs, triggered_by_job_manager=is_job_context
+                    valid_pairs, triggered_by_job_manager=False
                 )
-                try:
-                    main_window.job_manager_initiated_record = False
-                except Exception:
-                    pass
             else:
                 print(
                     "[WARN] Recording not started due to invalid marker configuration."
                 )
 
     else:
-        # --- Stop confirmation (manual UI only) ---
-        # The record button is toggle-based, and many call sites do not check return
-        # values. Therefore, cancellation must be handled here without relying on
-        # callers.
-        #
-        # Do NOT prompt when this stop was initiated programmatically by Job Manager.
         should_confirm_stop = bool(
             main_window.control.get("ConfirmBeforeStoppingRecordingToggle", True)
         )
         if (
             (video_processor.is_processing_segments or video_processor.recording)
-            and not job_mgr_flag
             and should_confirm_stop
         ):
             try:
@@ -2168,51 +1956,29 @@ def record_video(main_window: "MainWindow", checked: bool):
                 box.setDefaultButton(QtWidgets.QMessageBox.No)
 
                 if box.exec() != QtWidgets.QMessageBox.Yes:
-                    # User declined. Re-arm the toggle to the ON state.
                     main_window.buttonMediaRecord.blockSignals(True)
                     main_window.buttonMediaRecord.setChecked(True)
                     main_window.buttonMediaRecord.blockSignals(False)
                     set_record_button_icon_to_stop(main_window)
                     return
             except Exception:
-                # If anything goes wrong with the dialog, fail safe by NOT stopping.
                 main_window.buttonMediaRecord.blockSignals(True)
                 main_window.buttonMediaRecord.setChecked(True)
                 main_window.buttonMediaRecord.blockSignals(False)
                 set_record_button_icon_to_stop(main_window)
                 return
 
-        # If a job queue is actively running, treat manual record-stop as a request
-        # to cancel remaining queued jobs after this stop.
-        job_processor = getattr(main_window, "job_processor", None)
-        if (
-            job_processor is not None
-            and hasattr(job_processor, "isRunning")
-            and job_processor.isRunning()
-            and not job_mgr_flag
-            and hasattr(job_processor, "request_cancel")
-        ):
-            try:
-                job_processor.request_cancel(
-                    "Cancelled by user via Record stop while batch queue is active."
-                )
-            except Exception as e:
-                print(f"[WARN] Failed to request queue cancellation from UI stop: {e}")
-
         if video_processor.is_processing_segments:
             print(
                 "[INFO] Record button released: User requested stop during segment processing. Finalizing..."
             )
-            # Finalize segment concatenation with segments processed so far
             video_processor.finalize_segment_concatenation()
-        elif video_processor.recording:  # Check if default style recording was active
+        elif video_processor.recording:
             print(
                 "[INFO] Record button released: User requested stop during default recording. Finalizing..."
             )
-            # Finalize the default style recording
             video_processor._finalize_default_style_recording()
         else:
-            # No recording was active (maybe an immediate click-off or already stopped)
             print("[WARN] Record button released: No active recording found.")
             set_record_button_icon_to_play(main_window)
             main_window.buttonMediaPlay.setEnabled(True)
@@ -3125,312 +2891,3 @@ def toggle_live_sound(main_window: "MainWindow", toggle_value: bool):
     if was_processing:
         main_window.buttonMediaPlay.click()
         main_window.buttonMediaPlay.click()
-
-
-def _set_media_controls_visible(main_window: "MainWindow", visible: bool):
-    """
-    Role: Recursively shows/hides media control widgets and safely manages layout spacers.
-    Impact: Avoids blank spaces (cadres) by cleanly detaching spacers using takeAt()
-            instead of forcing their sizes to 0. Also preserves the original visibility
-            state of widgets to ensure media-specific elements (like timelines for images)
-            remain hidden when restored.
-    """
-    if not hasattr(main_window, "_media_controls_currently_visible"):
-        main_window._media_controls_currently_visible = True
-
-    if main_window._media_controls_currently_visible == visible:
-        return  # State unchanged
-
-    main_window._media_controls_currently_visible = visible
-
-    if not visible:
-        main_window._media_spacers_storage = []
-        main_window._media_widgets_state = {}
-
-        def hide_and_remove(layout):
-            # Iterate backwards to safely use takeAt() without breaking layout indices
-            for i in reversed(range(layout.count())):
-                item = layout.itemAt(i)
-                if item.widget():
-                    main_window._media_widgets_state[item.widget()] = (
-                        item.widget().isVisible()
-                    )
-                    item.widget().hide()
-                elif item.spacerItem():
-                    spacer = layout.takeAt(i)
-                    main_window._media_spacers_storage.append((layout, i, spacer))
-                elif item.layout():
-                    hide_and_remove(item.layout())
-
-        hide_and_remove(main_window.verticalLayoutMediaControls)
-    else:
-        # Restore spacers safely in the exact original order
-        storage = getattr(main_window, "_media_spacers_storage", [])
-        for layout, i, spacer in reversed(storage):
-            layout.insertItem(i, spacer)
-        main_window._media_spacers_storage = []
-
-        def show_widgets(layout):
-            for i in range(layout.count()):
-                item = layout.itemAt(i)
-                if item.widget():
-                    was_visible = getattr(main_window, "_media_widgets_state", {}).get(
-                        item.widget(), True
-                    )
-                    item.widget().setVisible(was_visible)
-                elif item.layout():
-                    show_widgets(item.layout())
-
-        show_widgets(main_window.verticalLayoutMediaControls)
-
-    main_window.verticalLayout.invalidate()
-
-
-def toggle_theatre_mode(main_window: "MainWindow"):
-    """
-    Role: Activates Theatre Mode by safely detaching UI elements and preventing layout crushing.
-    Impact: Solves the "squashed text" bug and preserves exact QDockWidget sizes using saveState/restoreState.
-    """
-
-    is_theatre = getattr(main_window, "is_theatre_mode", False)
-    if not is_theatre:
-        # --- ENTER THEATRE MODE ---
-        main_window.is_theatre_mode = True
-        use_fullscreen_with_theatre = bool(
-            getattr(main_window, "control", {}).get(
-                "TheatreModeUsesFullscreenToggle", False
-            )
-        )
-
-        # 0. Save the exact state of all docks and toolbars (sizes, proportions, splitters)
-        main_window._saved_window_state = main_window.saveState()
-        main_window._was_maximized = main_window.isMaximized()
-        main_window._was_custom_fullscreen = main_window.isFullScreen()
-        main_window._theatre_forced_fullscreen = bool(
-            use_fullscreen_with_theatre and not main_window._was_custom_fullscreen
-        )
-        if main_window.isMaximized() or main_window.isFullScreen():
-            main_window._was_normal_geometry = main_window.normalGeometry()
-        else:
-            main_window._was_normal_geometry = main_window.geometry()
-
-        # 1. Save state and hide Docks, MenuBar
-        main_window._saved_dock_states = {
-            "input_Target_DockWidget": main_window.input_Target_DockWidget.isVisible(),
-            "input_Faces_DockWidget": main_window.input_Faces_DockWidget.isVisible(),
-            "jobManagerDockWidget": main_window.jobManagerDockWidget.isVisible(),
-            "controlOptionsDockWidget": main_window.controlOptionsDockWidget.isVisible(),
-            "menuBar": main_window.menuBar().isVisible(),
-            "facesPanelGroupBox": main_window.facesPanelGroupBox.isVisible(),
-        }
-
-        main_window.input_Target_DockWidget.hide()
-        main_window.input_Faces_DockWidget.hide()
-        main_window.jobManagerDockWidget.hide()
-        main_window.controlOptionsDockWidget.hide()
-        main_window.menuBar().hide()
-        main_window.facesPanelGroupBox.hide()
-
-        # 2. Save and remove layout margins/spacings (Removes borders)
-        main_window._saved_layout_props = {
-            "h_margin": main_window.horizontalLayout.contentsMargins(),
-            "v_margin": main_window.verticalLayout.contentsMargins(),
-            "h_spacing": main_window.horizontalLayout.spacing(),
-            "v_spacing": main_window.verticalLayout.spacing(),
-            "frame_shape": main_window.graphicsViewFrame.frameShape(),
-            "media_controls_margin": main_window.verticalLayoutMediaControls.contentsMargins(),
-        }
-
-        main_window.horizontalLayout.setContentsMargins(0, 0, 0, 0)
-        main_window.verticalLayout.setContentsMargins(0, 0, 0, 0)
-        main_window.horizontalLayout.setSpacing(0)
-        main_window.verticalLayout.setSpacing(0)
-        main_window.verticalLayoutMediaControls.setContentsMargins(0, 0, 0, 16)
-
-        # 3. Safely detach spacers and hide Top Bar widgets
-        main_window._top_bar_spacers = []
-        main_window._top_bar_widgets_state = {}
-
-        for i in reversed(range(main_window.panelVisibilityCheckBoxLayout.count())):
-            item = main_window.panelVisibilityCheckBoxLayout.itemAt(i)
-            if item.widget():
-                main_window._top_bar_widgets_state[item.widget()] = (
-                    item.widget().isVisible()
-                )
-                item.widget().hide()
-            elif item.spacerItem():
-                spacer = main_window.panelVisibilityCheckBoxLayout.takeAt(i)
-                main_window._top_bar_spacers.append(
-                    (main_window.panelVisibilityCheckBoxLayout, i, spacer)
-                )
-
-        # Detach main layout stray spacers (top/bottom empty spaces)
-        main_window._main_v_spacers = []
-        for i in reversed(range(main_window.verticalLayout.count())):
-            item = main_window.verticalLayout.itemAt(i)
-            if item.spacerItem():
-                spacer = main_window.verticalLayout.takeAt(i)
-                main_window._main_v_spacers.append(
-                    (main_window.verticalLayout, i, spacer)
-                )
-
-        # 4. Hide media controls safely
-        main_window._media_controls_currently_visible = True
-        _set_media_controls_visible(main_window, False)
-
-        # 5. Clean GraphicsView Frame for edge-to-edge video
-        main_window.graphicsViewFrame.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
-        main_window.graphicsViewFrame.setStyleSheet("background-color: black;")
-        main_window.graphicsViewFrame.setVerticalScrollBarPolicy(
-            QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff
-        )
-        main_window.graphicsViewFrame.setHorizontalScrollBarPolicy(
-            QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff
-        )
-
-        # 6. Preserve the base window mode; optionally enter fullscreen with theatre.
-        if main_window._was_custom_fullscreen or main_window._theatre_forced_fullscreen:
-            if main_window._theatre_forced_fullscreen:
-                main_window._fullscreen_restore_was_maximized = (
-                    main_window._was_maximized
-                )
-                main_window._fullscreen_restore_geometry = (
-                    None
-                    if main_window._was_maximized
-                    else main_window._was_normal_geometry
-                )
-            main_window.setWindowState(QtCore.Qt.WindowState.WindowFullScreen)
-            main_window.showFullScreen()
-            QtWidgets.QApplication.processEvents()
-            main_window.is_full_screen = True
-        else:
-            main_window.is_full_screen = False
-
-        # 7. Activate Hover Timer for media controls overlay
-        if not hasattr(main_window, "theatre_hover_timer"):
-            main_window.theatre_hover_timer = QtCore.QTimer(main_window)
-            main_window.theatre_hover_timer.setInterval(100)
-
-            def check_mouse_pos():
-                if not getattr(main_window, "is_theatre_mode", False):
-                    return
-                mouse_pos = main_window.mapFromGlobal(QtGui.QCursor.pos())
-                if mouse_pos.y() > main_window.height() * 0.85:
-                    _set_media_controls_visible(main_window, True)
-                else:
-                    _set_media_controls_visible(main_window, False)
-
-            main_window.theatre_hover_timer.timeout.connect(check_mouse_pos)
-
-        main_window.theatre_hover_timer.start()
-
-    else:
-        # --- EXIT THEATRE MODE ---
-        main_window.is_theatre_mode = False
-        main_window.setUpdatesEnabled(False)
-
-        if hasattr(main_window, "theatre_hover_timer"):
-            main_window.theatre_hover_timer.stop()
-
-        # 1. Force media controls to become visible and restore their spacers
-        _set_media_controls_visible(main_window, True)
-
-        # 2. Re-attach main layout stray spacers
-        for layout, i, spacer in reversed(getattr(main_window, "_main_v_spacers", [])):
-            layout.insertItem(i, spacer)
-        main_window._main_v_spacers = []
-
-        # 3. Re-attach top bar spacers and restore widget visibility
-        for layout, i, spacer in reversed(getattr(main_window, "_top_bar_spacers", [])):
-            layout.insertItem(i, spacer)
-        main_window._top_bar_spacers = []
-
-        for i in range(main_window.panelVisibilityCheckBoxLayout.count()):
-            item = main_window.panelVisibilityCheckBoxLayout.itemAt(i)
-            if item.widget():
-                was_visible = getattr(main_window, "_top_bar_widgets_state", {}).get(
-                    item.widget(), True
-                )
-                item.widget().setVisible(was_visible)
-
-        # 4. Restore Main Layout Props (restores spaces and margins)
-        props = getattr(main_window, "_saved_layout_props", {})
-        if "h_margin" in props:
-            main_window.horizontalLayout.setContentsMargins(props["h_margin"])
-        if "v_margin" in props:
-            main_window.verticalLayout.setContentsMargins(props["v_margin"])
-        if "h_spacing" in props:
-            main_window.horizontalLayout.setSpacing(props["h_spacing"])
-        if "v_spacing" in props:
-            main_window.verticalLayout.setSpacing(props["v_spacing"])
-        if "frame_shape" in props:
-            main_window.graphicsViewFrame.setFrameShape(props["frame_shape"])
-        if "media_controls_margin" in props:
-            main_window.verticalLayoutMediaControls.setContentsMargins(
-                props["media_controls_margin"]
-            )
-
-        main_window.graphicsViewFrame.setStyleSheet("")
-        main_window.graphicsViewFrame.setVerticalScrollBarPolicy(
-            QtCore.Qt.ScrollBarPolicy.ScrollBarAsNeeded
-        )
-        main_window.graphicsViewFrame.setHorizontalScrollBarPolicy(
-            QtCore.Qt.ScrollBarPolicy.ScrollBarAsNeeded
-        )
-
-        # 5. Restore Docks & Panels
-        states = getattr(main_window, "_saved_dock_states", {})
-        if states.get("input_Target_DockWidget"):
-            main_window.input_Target_DockWidget.show()
-        if states.get("input_Faces_DockWidget"):
-            main_window.input_Faces_DockWidget.show()
-        if states.get("jobManagerDockWidget"):
-            main_window.jobManagerDockWidget.show()
-        if states.get("controlOptionsDockWidget"):
-            main_window.controlOptionsDockWidget.show()
-        if states.get("menuBar"):
-            main_window.menuBar().show()
-        if states.get("facesPanelGroupBox"):
-            main_window.facesPanelGroupBox.show()
-            hint_height = main_window.facesPanelGroupBox.sizeHint().height()
-            main_window.facesPanelGroupBox.setMinimumHeight(hint_height)
-
-        # Exit Fullscreen mode
-        was_custom_fullscreen = getattr(main_window, "_was_custom_fullscreen", False)
-        was_maximized = getattr(main_window, "_was_maximized", False)
-        saved_normal_geometry = getattr(main_window, "_was_normal_geometry", None)
-        main_window._theatre_forced_fullscreen = False
-
-        _restore_window_base_mode(
-            main_window,
-            restore_to_fullscreen=was_custom_fullscreen,
-            restore_to_maximized=was_maximized and not was_custom_fullscreen,
-            restore_geometry=saved_normal_geometry,
-        )
-
-        # Restores the exact layout state of docks (fixes the Input Faces / Target Video sizing)
-        if hasattr(main_window, "_saved_window_state"):
-            main_window.restoreState(main_window._saved_window_state)
-
-        # Force the application layout engine to process the new geometry immediately
-        QtWidgets.QApplication.processEvents()
-        main_window.verticalLayout.invalidate()
-
-        # Release the minimum height lock so the UI is dynamically responsive again
-        if states.get("facesPanelGroupBox"):
-            main_window.facesPanelGroupBox.setMinimumHeight(0)
-
-        main_window.setUpdatesEnabled(True)
-
-    layout_actions.fit_image_to_view_onchange(main_window)
-
-
-def _run_context_menu_theatre_toggle(main_window: "MainWindow") -> None:
-    toggle_theatre_mode(main_window)
-    graphics_view = main_window.graphicsViewFrame
-    graphics_view.update()
-    graphics_view.viewport().update()
-    graphics_view.repaint()
-    graphics_view.viewport().repaint()
-    main_window.update()
-    main_window._sync_viewer_menu_actions()

@@ -683,14 +683,6 @@ def show_hide_input_faces_panel(main_window: "MainWindow", checked):
     fit_image_to_view_onchange(main_window)
 
 
-def show_hide_input_jobs_panel(main_window: "MainWindow", checked):
-    if checked:
-        main_window.jobManagerDockWidget.show()
-    else:
-        main_window.jobManagerDockWidget.hide()
-    fit_image_to_view_onchange(main_window)
-
-
 def show_hide_parameters_panel(main_window: "MainWindow", checked):
     if checked:
         main_window.controlOptionsDockWidget.show()
@@ -709,7 +701,6 @@ def show_hide_theatre_mode_panels(main_window: "MainWindow", checked):
             "faces": main_window.panel_visibility_state.get("faces", True),
             "parameters": main_window.panel_visibility_state.get("parameters", True),
             "input_faces": main_window.panel_visibility_state.get("input_faces", True),
-            "jobs": main_window.panel_visibility_state.get("jobs", True),
         }
 
     # Applies the saved states to the visible View-menu actions/state
@@ -722,7 +713,6 @@ def show_hide_theatre_mode_panels(main_window: "MainWindow", checked):
         main_window._set_panel_visibility(
             "input_faces", states.get("input_faces", True)
         )
-        main_window._set_panel_visibility("jobs", states.get("jobs", True))
 
     if checked:
         # Entering Theatre Mode: Save normal states and apply theatre states (default all False/Hidden)
@@ -734,7 +724,6 @@ def show_hide_theatre_mode_panels(main_window: "MainWindow", checked):
                 "faces": False,
                 "parameters": False,
                 "input_faces": False,
-                "jobs": False,
             }
         )
     else:
@@ -747,7 +736,6 @@ def show_hide_theatre_mode_panels(main_window: "MainWindow", checked):
                 "faces": True,
                 "parameters": True,
                 "input_faces": True,
-                "jobs": True,
             }
         )
         main_window._theatre_normal_panel_states = None
@@ -881,9 +869,6 @@ def set_up_menu_actions(main_window: "MainWindow"):
     )
     main_window.actionSave_Embeddings_As.triggered.connect(
         partial(save_load_actions.save_embeddings_to_file, main_window, True)
-    )
-    main_window.actionView_Fullscreen_F11.triggered.connect(
-        partial(video_control_actions.view_fullscreen, main_window)
     )
     main_window.actionEdit_CopyParameters.triggered.connect(
         partial(common_widget_actions.copy_selected_face_parameters, main_window)

@@ -18,7 +18,6 @@ from app.ui.widgets.actions import filter_actions
 from app.ui.widgets.actions import save_load_actions
 from app.ui.widgets.actions import list_view_actions
 from app.ui.widgets.actions import graphics_view_actions
-from app.ui.widgets.actions import job_manager_actions
 from app.ui.widgets.actions import preset_actions
 from app.ui.widgets.advanced_embedding_editor import EmbeddingGUI
 import app.ui.widgets.actions.control_actions as control_actions
@@ -134,15 +133,9 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
         self._rightFacesButtonsRow = None  # HLayout für Buttons
         self._faceButtonsOriginalTexts = {}  # zum Wiederherstellen
         self._rightFacesStripVisible = False
-        self._theatre_normal_panel_states: dict[str, bool] | None = None
-        self._theatre_mode_panel_states: dict[str, bool] | None = None
-        self._fullscreen_restore_was_maximized = False
-        self._fullscreen_restore_geometry = None
-        self._theatre_forced_fullscreen = False
         self.panel_visibility_state: dict[str, bool] = {
             "target_media": True,
             "input_faces": True,
-            "jobs": True,
             "faces": True,
             "parameters": True,
         }
@@ -198,7 +191,6 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
         self.last_target_media_folder_path = ""
         self.last_input_media_folder_path = ""
 
-        self.is_full_screen = False
         self.is_batch_processing = False
 
         # This flag is used to make sure new loaded media is properly fit into the graphics frame on the first load
@@ -367,9 +359,6 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
         video_control_actions.add_scan_review_controls(self)
         video_control_actions.initialize_media_button_icons(self)
 
-        self.viewFullScreenButton.clicked.connect(
-            partial(video_control_actions.view_fullscreen, self)
-        )
         # Set up videoSeekLineEdit and add the event filter to handle changes
         video_control_actions.set_up_video_seek_line_edit(self)
 
@@ -513,9 +502,6 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
         )
 
         QtCore.QTimer.singleShot(0, self._configure_faces_panel_button_column)
-        self.theatreModeButton.clicked.connect(
-            partial(video_control_actions.toggle_theatre_mode, self)
-        )
 
         self._install_view_panel_toggle_actions()
         self._install_view_navigation_actions()
@@ -632,9 +618,6 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
         # Set face_swap_tab as the default focused tab
         self.tabWidget.setCurrentIndex(0)
         # widget_actions.add_groupbox_and_widgets_from_layout_map(self)
-
-        job_manager_actions.setup_job_manager_ui(self)
-        self._constrain_job_manager_min_width()
 
         # Connect Denoiser Mode SelectionBox signals to update visibility
         denoiser_mode_before_combo = self.parameter_widgets.get(
@@ -1040,42 +1023,12 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
             scene_rect = pixmap_item.boundingRect()
             self.graphicsViewFrame.setSceneRect(scene_rect)
             graphics_view_actions.fit_image_to_view(self, pixmap_item, scene_rect)
-        self._sync_theatre_base_window_snapshot()
 
     def moveEvent(self, event: QtGui.QMoveEvent):
         super().moveEvent(event)
-        self._sync_theatre_base_window_snapshot()
 
     def changeEvent(self, event: QtCore.QEvent):
         super().changeEvent(event)
-        if event.type() == QtCore.QEvent.Type.WindowStateChange:
-            self.is_full_screen = self.isFullScreen()
-            self._sync_theatre_base_window_snapshot()
-
-    def _sync_theatre_base_window_snapshot(self):
-        if not getattr(self, "is_theatre_mode", False):
-            return
-
-        if self.isFullScreen():
-            if getattr(self, "_theatre_forced_fullscreen", False):
-                return
-            restore_geometry = getattr(self, "_fullscreen_restore_geometry", None)
-            self._was_custom_fullscreen = True
-            self._was_maximized = False
-            self._was_normal_geometry = (
-                restore_geometry
-                if restore_geometry is not None
-                else self.normalGeometry()
-            )
-            return
-
-        self._was_custom_fullscreen = False
-        if self.isMaximized():
-            self._was_maximized = True
-            self._was_normal_geometry = self.normalGeometry()
-        else:
-            self._was_maximized = False
-            self._was_normal_geometry = self.geometry()
 
     def eventFilter(self, watched, event):
         viewport_widget = getattr(self, "mediaControlsViewportWidget", None)
@@ -1107,19 +1060,6 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
 
     def keyPressEvent(self, event):
         match event.key():
-            case QtCore.Qt.Key_Escape:
-                if getattr(self, "is_theatre_mode", False) and self.control.get(
-                    "TheatreModeUsesFullscreenToggle", False
-                ):
-                    video_control_actions.toggle_theatre_mode(self)
-                elif self.isFullScreen():
-                    video_control_actions.view_fullscreen(self)
-                elif getattr(self, "is_theatre_mode", False):
-                    video_control_actions.toggle_theatre_mode(self)
-            case QtCore.Qt.Key_F11:
-                video_control_actions.view_fullscreen(self)
-            case QtCore.Qt.Key_T:
-                video_control_actions.toggle_theatre_mode(self)
             case QtCore.Qt.Key_V:
                 video_control_actions.advance_video_slider_by_n_frames(self, n=1)
             case QtCore.Qt.Key_C:
@@ -1324,8 +1264,6 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
         ]
         icon_utility_buttons = [
             self.liveSoundButton,
-            self.viewFullScreenButton,
-            self.theatreModeButton,
         ]
         text_utility_buttons = [
             getattr(self, "scanToolsToggleButton", None),
@@ -1439,8 +1377,6 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
             self.buttonMediaPlay,
             self.frameAdvanceButton,
             self.liveSoundButton,
-            self.viewFullScreenButton,
-            self.theatreModeButton,
         ]:
             button.show()
             self.mediaControlsMainLayout.addWidget(button)
@@ -1461,7 +1397,6 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
         panel_toggle_specs = [
             ("target_media", "TargetMediaCheckBox", "Target Videos/Images"),
             ("input_faces", "InputFacesCheckBox", "Input Faces"),
-            ("jobs", "JobsCheckBox", "Job Manager"),
             ("faces", "facesPanelCheckBox", "Faces / Embeddings"),
             ("parameters", "parametersPanelCheckBox", "Parameters"),
         ]
@@ -1484,9 +1419,8 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
             )
 
             setattr(self, f"actionViewToggle_{panel_key}", action)
-            self.menuView.insertAction(self.actionView_Fullscreen_F11, action)
+            self.menuView.addAction(action)
 
-        self.menuView.insertSeparator(self.actionView_Fullscreen_F11)
         self.panelVisibilityCheckBoxLayout.setContentsMargins(0, 0, 0, 0)
         self.panelVisibilityCheckBoxLayout.setSpacing(0)
         self.panelVisibilityCheckBoxLayout.setSizeConstraint(
@@ -1500,9 +1434,6 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
         """Add viewport navigation and presentation actions to the View menu."""
         if getattr(self, "_view_navigation_actions_installed", False):
             return
-
-        self.actionView_Fullscreen_F11.setText("Fullscreen\tF11")
-        self.actionView_Fullscreen_F11.setCheckable(True)
 
         fit_action = QtGui.QAction("Fit to View", self.menuView)
         fit_action.setShortcut(QtGui.QKeySequence("Ctrl+0"))
@@ -1554,11 +1485,9 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
         self.actionView_FaceCompare = face_compare_action
         self._view_mask_actions = mask_actions
 
-        self.menuView.removeAction(self.actionView_Fullscreen_F11)
         self.menuView.addAction(self.actionView_FitToView)
         self.menuView.addAction(self.actionView_100Zoom)
         self.menuView.addSeparator()
-        self.menuView.addAction(self.actionView_Fullscreen_F11)
         self.menuView.addAction(self.actionView_TheatreMode)
         self.menuView.addSeparator()
         self.menuView.addAction(self.actionView_FaceCompare)
@@ -1596,7 +1525,6 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
         panel_handlers = {
             "target_media": layout_actions.show_hide_input_target_media_panel,
             "input_faces": layout_actions.show_hide_input_faces_panel,
-            "jobs": layout_actions.show_hide_input_jobs_panel,
             "faces": layout_actions.show_hide_faces_panel,
             "parameters": layout_actions.show_hide_parameters_panel,
         }
@@ -1610,43 +1538,10 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
             action.setChecked(checked)
             action.blockSignals(False)
 
-    def _constrain_job_manager_min_width(self):
-        """Prevent Job Manager content from forcing a large left-dock min width."""
-        dock = getattr(self, "jobManagerDockWidget", None)
-        if dock is None:
-            return
-        dock.setMinimumWidth(80)
-        contents = dock.widget()
-        if contents is not None:
-            contents.setMinimumWidth(80)
-            contents.setSizePolicy(
-                QtWidgets.QSizePolicy.Policy.Preferred,
-                QtWidgets.QSizePolicy.Policy.Preferred,
-            )
-        for btn_name in (
-            "addJobButton",
-            "loadJobButton",
-            "deleteJobButton",
-            "refreshJobListButton",
-            "buttonProcessAll",
-            "buttonProcessSelected",
-        ):
-            btn = getattr(self, btn_name, None)
-            if btn is None:
-                continue
-            btn.setMinimumWidth(0)
-            sp = btn.sizePolicy()
-            sp.setHorizontalPolicy(QtWidgets.QSizePolicy.Policy.Minimum)
-            btn.setSizePolicy(sp)
-        job_list = getattr(self, "jobQueueList", None)
-        if job_list is not None:
-            job_list.setMinimumWidth(0)
-
     def _panel_widget_for_key(self, panel_key: str):
         panel_widgets = {
             "target_media": self.input_Target_DockWidget,
             "input_faces": self.input_Faces_DockWidget,
-            "jobs": self.jobManagerDockWidget,
             "faces": self.facesPanelGroupBox,
             "parameters": self.controlOptionsDockWidget,
         }
@@ -1676,7 +1571,6 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
         dock_sync_specs = [
             ("target_media", self.input_Target_DockWidget),
             ("input_faces", self.input_Faces_DockWidget),
-            ("jobs", self.jobManagerDockWidget),
             ("parameters", self.controlOptionsDockWidget),
         ]
         for panel_key, dock_widget in dock_sync_specs:
@@ -1755,9 +1649,6 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
         }
         return context_labels.get(value, self._mask_show_option_label(value))
 
-    def _is_fullscreen_menu_active(self) -> bool:
-        return self.isFullScreen()
-
     def _handle_viewer_mask_action(self, value: str, checked: bool):
         current_value = self._get_current_mask_show_value()
         if self.view_face_mask_enabled and value == current_value and not checked:
@@ -1798,21 +1689,6 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
             self._mask_show_selection_sync_installed = True
 
     def _sync_viewer_menu_actions(self):
-        fullscreen_action = getattr(self, "actionView_Fullscreen_F11", None)
-        if fullscreen_action is not None:
-            fullscreen_action.blockSignals(True)
-            fullscreen_action.setCheckable(True)
-            fullscreen_action.setChecked(self._is_fullscreen_menu_active())
-            fullscreen_action.setEnabled(True)
-            fullscreen_action.blockSignals(False)
-
-        theatre_action = getattr(self, "actionView_TheatreMode", None)
-        if theatre_action is not None:
-            theatre_action.blockSignals(True)
-            theatre_action.setCheckable(True)
-            theatre_action.setChecked(bool(getattr(self, "is_theatre_mode", False)))
-            theatre_action.blockSignals(False)
-
         compare_action = getattr(self, "actionView_FaceCompare", None)
         if compare_action is not None:
             compare_action.blockSignals(True)

@@ -290,16 +290,11 @@ def _apply_workspace_window_state(
     main_window: "MainWindow", window_state: dict
 ) -> bool:
     is_maximized = window_state.get("isMaximized", False)
-    is_fullscreen = window_state.get("isFullScreen", False)
-
-    main_window._fullscreen_restore_was_maximized = False
-    main_window._fullscreen_restore_geometry = None
 
     if is_maximized:
         main_window.resize(main_window.sizeHint())
         main_window.showMaximized()
         main_window.menuBar().show()
-        main_window.is_full_screen = False
         return False
 
     restored_rect = _get_clamped_window_geometry(
@@ -309,18 +304,8 @@ def _apply_workspace_window_state(
         window_state.get("width", main_window.width()),
         window_state.get("height", main_window.height()),
     )
-
-    if is_fullscreen:
-        main_window._fullscreen_restore_was_maximized = False
-        main_window._fullscreen_restore_geometry = restored_rect
-        main_window.resize(main_window.sizeHint())
-        main_window.showFullScreen()
-        main_window.is_full_screen = True
-        return False
-
     main_window.setGeometry(restored_rect)
     main_window.menuBar().show()
-    main_window.is_full_screen = False
     return True
 
 
@@ -1209,10 +1194,6 @@ def load_saved_workspace(
                     "input_faces",
                     window_state.get("InputFacesCheckBox", True),
                 ),
-                "jobs": window_state.get(
-                    "jobs",
-                    window_state.get("JobsCheckBox", True),
-                ),
                 "faces": window_state.get(
                     "faces",
                     window_state.get("facesPanelCheckBox", True),
@@ -1321,47 +1302,22 @@ def save_current_workspace(
 
     # --- Save Window State ---
     # --- Save dock layout / panel sizes ---
-    is_theatre_mode = bool(getattr(main_window, "is_theatre_mode", False))
-    saved_is_fullscreen = bool(main_window.is_full_screen)
-    saved_is_maximized = (
-        bool(main_window.isMaximized()) if not saved_is_fullscreen else False
-    )
+    saved_is_maximized = bool(main_window.isMaximized())
     saved_geometry = main_window.geometry()
-    dock_state_source = None
-    if is_theatre_mode:
-        saved_is_fullscreen = bool(
-            getattr(main_window, "_was_custom_fullscreen", main_window.is_full_screen)
-        )
-        saved_is_maximized = (
-            bool(getattr(main_window, "_was_maximized", main_window.isMaximized()))
-            if not saved_is_fullscreen
-            else False
-        )
-        saved_geometry = getattr(main_window, "_was_normal_geometry", saved_geometry)
-        dock_state_source = getattr(main_window, "_saved_window_state", None)
-    elif saved_is_fullscreen:
-        restore_geometry = getattr(main_window, "_fullscreen_restore_geometry", None)
-        if restore_geometry is not None:
-            saved_geometry = restore_geometry
 
     try:
-        # saveState returns QByteArray; convert to base64 string for json compatibility
-        if dock_state_source is None:
-            dock_state_source = main_window.saveState()
-        dock_state_data = dock_state_source.toBase64().data().decode("utf-8")
+        dock_state_data = main_window.saveState().toBase64().data().decode("utf-8")
     except Exception:
         dock_state_data = ""
-
+        
     window_state_data = {
         "x": saved_geometry.x(),
         "y": saved_geometry.y(),
         "height": saved_geometry.height(),
         "width": saved_geometry.width(),
         "isMaximized": saved_is_maximized,
-        "isFullScreen": saved_is_fullscreen,
         "target_media": main_window.panel_visibility_state.get("target_media", True),
         "input_faces": main_window.panel_visibility_state.get("input_faces", True),
-        "jobs": main_window.panel_visibility_state.get("jobs", True),
         "faces": main_window.panel_visibility_state.get("faces", True),
         "parameters": main_window.panel_visibility_state.get("parameters", True),
         "filterImagesCheckBox": main_window.targetVideosFilterImagesCheckBox.isChecked(),
@@ -1389,7 +1345,7 @@ def save_current_workspace(
         },
         "dock_state": dock_state_data,
     }
-
+    
     # --- Check if Denoiser is enabled ---
     control = main_window.control
     is_denoiser_enabled = (
@@ -1595,223 +1551,6 @@ def save_current_workspace(
                     f"Failed to save workspace:\n{e}",
                     main_window,
                 )
-
-
-def save_current_job(main_window: "MainWindow"):
-    # Check for necessary conditions
-    if not main_window.selected_video_button:
-        common_widget_actions.create_and_show_messagebox(
-            main_window, "Error", "No target video selected.", main_window
-        )
-        return
-    if not main_window.target_faces:
-        common_widget_actions.create_and_show_messagebox(
-            main_window, "Error", "No target faces detected or assigned.", main_window
-        )
-        return
-
-    # Check on Dict to prevent crash
-    if not any(
-        len(tf.assigned_input_faces) > 0 for tf in main_window.target_faces.values()
-    ):
-        common_widget_actions.create_and_show_messagebox(
-            main_window,
-            "Error",
-            "No input faces assigned to any target face.",
-            main_window,
-        )
-        return
-
-    # Show dialog to get job name and output options
-    dialog = widget_components.SaveJobDialog(main_window)
-    if dialog.exec() == QtWidgets.QDialog.Accepted:
-        job_name = dialog.job_name
-        use_job_name = dialog.use_job_name_for_output
-        output_filename = dialog.output_file_name
-        if not job_name:
-            common_widget_actions.create_and_show_messagebox(
-                main_window, "Error", "Job name cannot be empty.", main_window
-            )
-            return
-    else:
-        return  # User cancelled
-
-    # Construct the intended job file path early for registry registration
-    jobs_dir = main_window.project_root_path / ".jobs"
-    jobs_dir.mkdir(parents=True, exist_ok=True)
-    save_path = jobs_dir / f"{job_name}.json"
-    resolved_parent_path = str(save_path)
-
-    # --- Check if Denoiser is enabled ---
-    control = main_window.control
-    is_denoiser_enabled = (
-        control.get("DenoiserUNetEnableBeforeRestorersToggle", False)
-        or control.get("DenoiserAfterFirstRestorerToggle", False)
-        or control.get("DenoiserAfterRestorersToggle", False)
-    )
-
-    # --- Serialize Input Faces ---
-    input_faces_data = {}
-    for face_id, input_face in main_window.input_faces.items():
-        kv_map_path = None
-        if is_denoiser_enabled and getattr(input_face, "kv_map", None) is not None:
-            try:
-                payload = {"kv_map": input_face.kv_map}
-                # Optimize: Route through hashing helper to deduplicate and register BOTH paths
-                kv_map_path = _save_hashed_kv_payload(
-                    main_window,
-                    payload,
-                    "reference_kv_data",
-                    parent_file_paths=[
-                        resolved_parent_path,
-                        str(input_face.media_path),
-                    ],
-                )
-            except Exception as e:
-                print(
-                    f"[ERROR] Error saving hashed K/V map for input face {input_face.face_id}: {e}"
-                )
-
-        input_faces_data[face_id] = {
-            "media_path": input_face.media_path,
-            "kv_map": kv_map_path,
-        }
-
-    # --- Serialize Embeddings for Job ---
-    embeddings_data = {}
-    for eid, emb in list_view_actions.get_all_merged_embeddings(main_window).items():
-        kv_map_path = None
-        # Check for either the new list format or the legacy map format
-        kv_payload_to_save = getattr(emb, "kv_map_list", None) or getattr(
-            emb, "kv_map", None
-        )
-
-        if kv_payload_to_save is not None:
-            try:
-                payload = (
-                    {"kv_map_list": kv_payload_to_save}
-                    if getattr(emb, "kv_map_list", None)
-                    else {"kv_map": kv_payload_to_save}
-                )
-                # Optimize: Route through hashing helper to deduplicate and register
-                kv_map_path = _save_hashed_kv_payload(
-                    main_window,
-                    payload,
-                    "reference_kv_data",
-                    parent_file_paths=resolved_parent_path,
-                )
-            except Exception as e:
-                print(f"[ERROR] Error saving hashed K/V map for embedding {eid}: {e}")
-
-        embeddings_data[eid] = {
-            "name": emb.embedding_name,
-            "store": {m: e.tolist() for m, e in emb.embedding_store.items()},
-            "kv_map": kv_map_path,
-        }
-
-    # Prepare job data
-    default_params = cast(
-        misc_helpers.ParametersDict, main_window.default_parameters
-    ).data
-    raw_current_params = (
-        main_window.current_widget_parameters.data.copy()
-        if isinstance(
-            main_window.current_widget_parameters, misc_helpers.ParametersDict
-        )
-        else main_window.current_widget_parameters.copy()
-    )
-
-    job_data = {
-        "job_name": job_name,
-        "use_job_name_for_output": use_job_name,
-        "output_file_name": output_filename,
-        "target_media_path": main_window.selected_video_button.media_path
-        if isinstance(
-            main_window.selected_video_button, widget_components.TargetMediaCardButton
-        )
-        else None,
-        "target_media_id": main_window.selected_video_button.media_id
-        if isinstance(
-            main_window.selected_video_button, widget_components.TargetMediaCardButton
-        )
-        else None,
-        "target_media_type": main_window.selected_video_button.file_type
-        if isinstance(
-            main_window.selected_video_button, widget_components.TargetMediaCardButton
-        )
-        else None,
-        # --- Explicitly save button states for jobs ---
-        "swap_faces_enabled": main_window.swapfacesButton.isChecked(),
-        "edit_faces_enabled": main_window.editFacesButton.isChecked(),
-        "input_faces_data": input_faces_data,
-        "target_faces_data": {},
-        "embeddings_data": embeddings_data,
-        "markers": sanitize_markers_dictionary(
-            main_window,
-            convert_markers_to_supported_type(
-                main_window, cast(MarkerTypes, copy.deepcopy(main_window.markers)), dict
-            ),
-        ),
-        "issue_frames_by_face": {
-            str(face_id): sorted(frames)
-            for face_id, frames in main_window.issue_frames_by_face.items()
-        },
-        "dropped_frames": sorted(main_window.dropped_frames),
-        "control": sanitize_state_dictionary(
-            main_window.control.copy(), main_window.control
-        ),
-        "job_marker_pairs": main_window.job_marker_pairs,
-        "scan_tools_expanded": getattr(main_window, "scan_tools_expanded", False),
-        "current_widget_parameters": sanitize_state_dictionary(
-            raw_current_params, default_params
-        ),
-        "last_target_media_folder_path": main_window.last_target_media_folder_path,
-        "last_input_media_folder_path": main_window.last_input_media_folder_path,
-    }
-
-    # Serialize target face specifics for the job
-    for face_id, target_face in main_window.target_faces.items():
-        # Security to handle either custom ParametersDict or native dict
-        params_source = main_window.parameters.get(
-            str(face_id), main_window.default_parameters
-        )
-        params_to_save = (
-            params_source.data.copy()
-            if isinstance(params_source, misc_helpers.ParametersDict)
-            else params_source.copy()
-        )
-
-        sanitized_params_to_save = sanitize_state_dictionary(
-            params_to_save, default_params
-        )
-
-        job_data["target_faces_data"][face_id] = {
-            "cropped_face": target_face.cropped_face.tolist(),
-            "embedding_store": {
-                m: e.tolist() for m, e in target_face.embedding_store.items()
-            },
-            "parameters": sanitized_params_to_save,
-            "assigned_input_faces": list(target_face.assigned_input_faces.keys()),
-            "assigned_merged_embeddings": list(
-                target_face.assigned_merged_embeddings.keys()
-            ),
-        }
-
-    # Save the job file
-    try:
-        with open(save_path, "w", encoding="utf-8") as f:
-            json.dump(job_data, f, indent=4)
-        common_widget_actions.create_and_show_toast_message(
-            main_window, "Job Saved", f"Job '{job_name}' saved successfully."
-        )
-        # Refresh the Job Manager list if it's visible
-        if hasattr(main_window, "jobManagerList"):
-            main_window.jobManagerList.refresh_jobs()
-    except Exception as e:
-        print(f"[ERROR] Failed to save job '{job_name}': {e}")
-        common_widget_actions.create_and_show_messagebox(
-            main_window, "Save Job Error", f"Failed to save job:\n{e}", main_window
-        )
 
 
 def purge_unused_kv_maps(main_window: "MainWindow"):
