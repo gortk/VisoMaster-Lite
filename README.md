@@ -9,7 +9,8 @@ This fork will aim to preserve the app in a stricter way to avoid that happening
 
 ---
 
-<img src=".github/screenshot_2.png" height="auto"/>
+<img height="auto" alt="v93yy4WyKb" src="https://github.com/user-attachments/assets/f28328b7-8232-4bca-bb85-50ebc2de64b4" />
+
 
 *All faces shown in the screenshot are synthetic demo images used for illustration.*
 
