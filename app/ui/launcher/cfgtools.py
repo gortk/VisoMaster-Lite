@@ -1,6 +1,6 @@
 # cfgtools.py
 # ---------------------------------------------------------------------------
-# Configuration Management for VisoMaster Fusion Launcher
+# Configuration Management for VisoMaster Lite Launcher
 # ---------------------------------------------------------------------------
 # Handles reading/writing of portable.cfg — a lightweight key=value config file
 # used to store runtime metadata such as:
