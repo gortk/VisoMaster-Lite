@@ -4,7 +4,8 @@ VisoMaster-Lite is a desktop application for AI-powered face swapping, enhanceme
 
 Its father is VisoMaster-Fusion which has a lot of community based features. Some of those features, I personally think that are redundant or doesn't have a use for most people. Since now AI enabled most of us to develop features, everybody is rushing to add its own niche feature and the lack of moderation is turning the app into bloatware slowly but steadily.
 
-This fork will aim to preserve the app in a stricter way to avoid that happening again.
+This fork will aim to preserve the app in a stricter way to avoid that happening again and will not be eager to implement cutting-edge features, expect no new models that are heavy on VRAM. The focus here is bug fixing and QoL.
+
 
 ---
 
