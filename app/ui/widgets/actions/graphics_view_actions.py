@@ -14,48 +14,19 @@ def _item_belongs_to_scene(item, scene) -> bool:
 
 
 def get_base_pixmap_item(main_window: "MainWindow"):
-    """Return the live frame item, excluding the screenshot comparison overlay."""
+    """Return the live frame item."""
     scene = main_window.graphicsViewFrame.scene()
     pixmap_item = getattr(main_window, "_base_pixmap_item", None)
     if _item_belongs_to_scene(pixmap_item, scene):
         return pixmap_item
 
-    overlay_item = getattr(main_window, "_screenshot_overlay_item", None)
     for item in scene.items():
-        if isinstance(item, QtWidgets.QGraphicsPixmapItem) and item is not overlay_item:
+        if isinstance(item, QtWidgets.QGraphicsPixmapItem):
             main_window._base_pixmap_item = item
             return item
     return None
 
 
-def get_screenshot_overlay_item(main_window: "MainWindow"):
-    scene = main_window.graphicsViewFrame.scene()
-    overlay_item = getattr(main_window, "_screenshot_overlay_item", None)
-    return overlay_item if _item_belongs_to_scene(overlay_item, scene) else None
-
-
-def ensure_screenshot_overlay_item(main_window: "MainWindow"):
-    """Create or reuse the top-level session screenshot item."""
-    overlay_item = get_screenshot_overlay_item(main_window)
-    if overlay_item is None:
-        overlay_item = QtWidgets.QGraphicsPixmapItem()
-        overlay_item.setTransformationMode(
-            QtCore.Qt.TransformationMode.SmoothTransformation
-        )
-        overlay_item.setZValue(10000.0)
-        main_window.graphicsViewFrame.scene().addItem(overlay_item)
-        main_window._screenshot_overlay_item = overlay_item
-    return overlay_item
-
-
-def get_display_pixmap_item(main_window: "MainWindow"):
-    overlay_item = get_screenshot_overlay_item(main_window)
-    if overlay_item is not None and overlay_item.isVisible():
-        return overlay_item
-    return get_base_pixmap_item(main_window)
-
-
-# @misc_helpers.benchmark  (Keep this decorator if you have it)
 def update_graphics_view(
     main_window: "MainWindow",
     pixmap: QtGui.QPixmap,
@@ -101,29 +72,12 @@ def update_graphics_view(
         scene.addItem(pixmap_item)
 
     main_window._base_pixmap_item = pixmap_item
-    take_button = getattr(main_window, "takeScreenshotButton", None)
-    if take_button is not None:
-        take_button.setEnabled(not pixmap.isNull())
 
-    # Keep a visible session screenshot on top while the live frame updates below it.
-    show_button = getattr(main_window, "showScreenshotButton", None)
-    session_screenshot = getattr(main_window, "session_screenshot", None)
-    if (
-        show_button is not None
-        and show_button.isChecked()
-        and session_screenshot is not None
-        and not session_screenshot.isNull()
-    ):
-        overlay_item = ensure_screenshot_overlay_item(main_window)
-        overlay_item.setPixmap(session_screenshot)
-        overlay_item.show()
-
-    display_item = get_display_pixmap_item(main_window) or pixmap_item
-    scene_rect = display_item.boundingRect()
+    scene_rect = pixmap_item.boundingRect()
     main_window.graphicsViewFrame.setSceneRect(scene_rect)
 
     if reset_fit:
-        fit_image_to_view(main_window, display_item, scene_rect)
+        fit_image_to_view(main_window, pixmap_item, scene_rect)
 
 
 def zoom_andfit_image_to_view_onchange(main_window: "MainWindow", new_transform):
