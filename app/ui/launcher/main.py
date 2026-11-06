@@ -1,6 +1,6 @@
 # main.py
 # ---------------------------------------------------------------------------
-# Entry point for VisoMaster Fusion Launcher
+# Entry point for VisoMaster Lite Launcher
 # ---------------------------------------------------------------------------
 # Performs basic sanity checks, applies the True-Dark theme,
 # and initializes the main launcher window.
@@ -13,15 +13,15 @@ from .launcher_window import LauncherWindow
 
 
 def main():
-    """Initialize and run the VisoMaster Fusion Launcher."""
+    """Initialize and run the VisoMaster-Lite Launcher."""
     sys.stdout.flush()
 
     try:
         # --- Sanity Checks ---
         must_exist(PATHS["PYTHON_EXE"], "portable venv python")
         must_exist(PATHS["GIT_EXE"], "portable git.exe")
-        must_exist(PATHS["APP_DIR"], "VisoMaster-Fusion directory")
-        must_exist(PATHS["MAIN_PY"], "VisoMaster-Fusion main.py")
+        must_exist(PATHS["APP_DIR"], "VisoMaster-Lite directory")
+        must_exist(PATHS["MAIN_PY"], "VisoMaster-Lite main.py")
 
         # --- Enable Ctrl+C in console ---
         import signal
@@ -38,5 +38,5 @@ def main():
         sys.exit(app.exec())
 
     except Exception as e:
-        print(f"[Launcher] Failed to start the VisoMaster Fusion Launcher: {e}")
+        print(f"[Launcher] Failed to start the VisoMaster-Lite Launcher: {e}")
         sys.exit(1)
