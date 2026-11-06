@@ -1,8 +1,8 @@
 # __main__.py
 # ---------------------------------------------------------------------------
-# VisoMaster Fusion Launcher Entrypoint
+# VisoMaster Lite Launcher Entrypoint
 # ---------------------------------------------------------------------------
-# Runs the VisoMaster Fusion Launcher GUI via:
+# Runs the VisoMaster Lite Launcher GUI via:
 #   python -m app.ui.launcher
 # ---------------------------------------------------------------------------
 
@@ -15,15 +15,15 @@ from pathlib import Path
 # install script invokes `python -m app.ui.launcher` from the wrong directory.
 _repo_root = (
     Path(__file__).resolve().parent.parent.parent.parent
-)  # .../VisoMaster-Fusion
+)  # .../VisoMaster-Lite
 if str(_repo_root) not in sys.path:
     sys.path.insert(0, str(_repo_root))
 
 try:
     from .main import main
 
-    print("[Launcher] Starting VisoMaster Fusion Launcher...")
+    print("[Launcher] Starting VisoMaster Lite Launcher...")
     main()
 except Exception as e:
-    print(f"[Launcher] Failed to start the VisoMaster Fusion Launcher: {e}")
+    print(f"[Launcher] Failed to start the VisoMaster Lite Launcher: {e}")
     sys.exit(1)
