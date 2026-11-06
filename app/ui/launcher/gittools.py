@@ -1,6 +1,6 @@
 # gittools.py
 # ---------------------------------------------------------------------------
-# Git Utilities for VisoMaster Fusion Launcher
+# Git Utilities for VisoMaster Lite Launcher
 # ---------------------------------------------------------------------------
 # Provides simple Git integration for update checks, commit info, backups,
 # and rollback operations. All commands are executed using the portable
@@ -20,7 +20,7 @@ import sys
 from PySide6.QtWidgets import QApplication, QMessageBox
 
 
-RELEASE_BAT_URL = "https://github.com/VisoMasterFusion/VisoMaster-Fusion/releases/latest/download/Start_Portable.bat"
+RELEASE_BAT_URL = "https://github.com/gortk/VisoMaster-Lite/releases/latest/download/Start_Portable.bat"
 _remote_bat_cache: Path | None = None
 
 
