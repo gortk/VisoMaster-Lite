@@ -540,11 +540,18 @@ class TargetMediaCardButton(CardButton):
             )
 
     def remove_target_media_from_list(self):
+        from app.ui.widgets.actions.list_view_actions import (
+            _normalize_media_path,
+            _mark_path_ignored,
+        )
+
         main_window = self.main_window
         if video_control_actions.block_if_issue_scan_active(
             main_window, "remove target media"
         ):
             return
+        if self.media_path:
+            _mark_path_ignored(main_window, self.media_path)
         self.deselect_currently_selected_video(main_window)
         self.deleteLater()
 

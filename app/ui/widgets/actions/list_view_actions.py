@@ -1579,10 +1579,6 @@ def scan_and_append_new_target_media(main_window: "MainWindow"):
     if ignored is None:
         ignored = set()
         main_window._target_folder_ignored_paths = ignored
-    else:
-        ignored.intersection_update(
-            _normalize_media_path(p) for p in list(ignored) if os.path.exists(p)
-        )
 
     existing = {
         _normalize_media_path(p) for p in _existing_target_media_paths(main_window)
@@ -1737,6 +1733,16 @@ def _remove_subfolder_target_media(main_window: "MainWindow", folder: str) -> No
             except Exception:
                 pass
 
+def _mark_path_ignored(main_window: "MainWindow", media_path: str) -> None:
+    """Remember a user-removed path so auto-watch never re-adds it."""
+    if not media_path:
+        return
+    ignored = getattr(main_window, "_target_folder_ignored_paths", None)
+    if ignored is None:
+        ignored = set()
+        main_window._target_folder_ignored_paths = ignored
+    ignored.add(_normalize_media_path(media_path))
+
 
 def _clear_auto_loaded_target_media(main_window: "MainWindow") -> None:
     """Stop loaders and clear all non-webcam target media from the list."""
@@ -1847,7 +1853,8 @@ def set_target_folder_auto_watch(main_window: "MainWindow", enabled: bool):
         poll.stop()
         main_window._target_folder_seen_paths = set()
         main_window._target_folder_loading_paths = set()
-        main_window._target_folder_ignored_paths = set()
+        main_window._target_folder_ignored_paths = set() 
+        main_window._target_folder_pending_sizes = {}    
         if was_watching:
             _clear_auto_loaded_target_media(main_window)
         return
