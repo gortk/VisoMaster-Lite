@@ -19,15 +19,6 @@ This fork will aim to preserve the app in a stricter way to avoid that happening
 > Do not download from third-party websites.<br>
 
 
-## 🔗 Quick Links
-
-- [Download Portable Launcher](https://github.com/VisoMasterFusion/VisoMaster-Lite/releases/latest/download/Start_Portable.bat)
-- [Quick Start Guide](./docs/quickstart.md)
-- [User Manual](./docs/user_manual.md)
-
-
-
-
 ## 📦 Installation
 
 Download **only** the portable launcher from the release page:
