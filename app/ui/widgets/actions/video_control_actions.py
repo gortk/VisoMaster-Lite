@@ -1023,9 +1023,6 @@ def _replay_pending_target_media_refresh(main_window: "MainWindow") -> None:
     filter_actions.filter_target_videos(main_window)
     from app.ui.widgets.actions import list_view_actions
 
-    list_view_actions.load_target_webcams(main_window)
-
-
 def _get_ui_object_enabled_state(widget) -> bool:
     if widget is None:
         return False

@@ -33,8 +33,6 @@ def filter_target_videos(main_window: "MainWindow", *args):
             include_file_types.append("image")
         if main_window.targetVideosFilterVideosCheckBox.isChecked():
             include_file_types.append("video")
-        if main_window.targetVideosFilterWebcamsCheckBox.isChecked():
-            include_file_types.append("webcam")
 
         min_dimension = main_window.targetVideosList.minImageDimension()
         min_width = min_dimension.width if min_dimension else 0

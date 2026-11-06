@@ -674,36 +674,6 @@ def filter_target_videos(main_window):
         video_control_actions._mark_pending_target_media_refresh(main_window)
         return
     filter_actions.filter_target_videos(main_window)
-    load_target_webcams(main_window)
-
-
-@QtCore.Slot()
-def load_target_webcams(main_window: "MainWindow", *args, **kwargs):
-    from app.ui.widgets.actions import video_control_actions
-
-    if video_control_actions.is_issue_scan_active(main_window):
-        video_control_actions._mark_pending_target_media_refresh(main_window)
-        return
-    if main_window.targetVideosFilterWebcamsCheckBox.isChecked():
-        main_window.video_loader_worker = ui_workers.TargetMediaLoaderWorker(
-            main_window=main_window, webcam_mode=True
-        )
-        main_window.video_loader_worker.webcam_thumbnail_ready.connect(
-            partial(add_webcam_thumbnail_to_target_videos_list, main_window)
-        )
-        main_window.video_loader_worker.start()
-    else:
-        main_window.placeholder_update_signal.emit(main_window.targetVideosList, True)
-        for (
-            _,
-            target_video,
-        ) in main_window.target_videos.copy().items():  # Use a copy of the dict to prevent Dictionary changed during iteration exceptions
-            if target_video.file_type == "webcam":
-                target_video.remove_target_media_from_list()
-                if target_video == main_window.selected_video_button:
-                    main_window.selected_video_button = None
-        main_window.placeholder_update_signal.emit(main_window.targetVideosList, False)
-
 
 def clear_stop_loading_input_media(main_window: "MainWindow", clear_list: bool = True):
     # ADDED: Safely stop the batching timer and clear the queue.
