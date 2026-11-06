@@ -1999,11 +1999,6 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
             self.saveEmbeddingAsButton,
         ):
             embed_btn_row.addWidget(btn)
-        plus_button = self._find_embeddings_plus_button()
-        if plus_button is not None:
-            self._detach_from_layout(plus_button)
-            embed_btn_row.addWidget(plus_button)
-            plus_button.show()
         embed_btn_row.addStretch()
         embed_layout.addLayout(embed_btn_row)
 
