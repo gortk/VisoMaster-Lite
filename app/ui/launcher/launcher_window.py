@@ -1,6 +1,6 @@
 # launcher_window.py
 # ---------------------------------------------------------------------------
-# Main GUI Logic for VisoMaster Fusion Launcher
+# Main GUI Logic for VisoMaster Lite Launcher
 # ---------------------------------------------------------------------------
 # Handles:
 #   • Home, Maintenance, and Rollback pages
@@ -58,7 +58,7 @@ from .launcher_widgets import ToggleSwitch, StatusPill
 
 # ---------- Page Actions ----------
 ACTIONS_HOME = [
-    ("Launch VisoMaster Fusion", "on_launch", "Start normally"),
+    ("Launch VisoMaster-Lite", "on_launch", "Start normally"),
     ("Update / Maintenance", "_go_maint", "Open maintenance tools"),
     ("Quit", "close", "Exit launcher"),
 ]
@@ -121,11 +121,11 @@ def check_update_status():
 
 
 class LauncherWindow(QtWidgets.QWidget):
-    """Small, portable maintenance/launch UI for VisoMaster Fusion."""
+    """Small, portable maintenance/launch UI for VisoMaster-Lite."""
 
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("VisoMaster Fusion Launcher")
+        self.setWindowTitle("VisoMaster-Lite Launcher")
         if PATHS["SMALL_ICON"].exists():
             self.setWindowIcon(QtGui.QIcon(str(PATHS["SMALL_ICON"])))
 
@@ -338,7 +338,7 @@ class LauncherWindow(QtWidgets.QWidget):
         self._reset_page(self.page_home)
         lay = QtWidgets.QVBoxLayout(self.page_home)
         lay.addWidget(
-            make_header_widget("VisoMaster Fusion Launcher", str(PATHS["LOGO_PNG"]))
+            make_header_widget("VisoMaster-Lite Launcher", str(PATHS["LOGO_PNG"]))
         )
 
         for text, method, *tip in ACTIONS_HOME:
@@ -404,7 +404,7 @@ class LauncherWindow(QtWidgets.QWidget):
     def _build_maint_page(self):
         self._reset_page(self.page_maint)
         lay = QtWidgets.QVBoxLayout(self.page_maint)
-        lay.addWidget(make_header_widget("VisoMaster Fusion — Maintenance"))
+        lay.addWidget(make_header_widget("VisoMaster-Lite — Maintenance"))
 
         # --- Branch Switcher ---
         branch_box = QtWidgets.QFrame()
@@ -505,7 +505,7 @@ class LauncherWindow(QtWidgets.QWidget):
     def on_launch(self):
         self.hide()
         QtWidgets.QApplication.processEvents()
-        print("[Launcher] Launching VisoMaster Fusion...")
+        print("[Launcher] Launching VisoMaster-Lite...")
         import subprocess
 
         subprocess.run(
