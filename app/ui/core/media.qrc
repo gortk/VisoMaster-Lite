@@ -51,6 +51,8 @@
     <file>media/tl_right_off.png</file>
     <file>media/tl_right_on.png</file>
     <file>media/reset_default.png</file>
+	<file>media/frame_right.png</file>
+	<file>media/frame_left.png</file>
   </qresource>
   <qresource prefix="glyphs">
     <file>media/glyphs/camcorder_bold.svg</file>

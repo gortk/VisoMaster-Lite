@@ -307,7 +307,7 @@
              </property>
              <property name="icon">
               <iconset resource="media.qrc">
-               <normaloff>:/media/media/tl_left_hover.png</normaloff>:/media/media/tl_left_hover.png</iconset>
+               <normaloff>:/media/media/frame_left.png</normaloff>:/media/media/frame_left.png</iconset>
              </property>
              <property name="flat">
               <bool>true</bool>
@@ -427,7 +427,7 @@
              </property>
              <property name="icon">
               <iconset resource="media.qrc">
-               <normaloff>:/media/media/tl_right_hover.png</normaloff>:/media/media/tl_right_hover.png</iconset>
+               <normaloff>:/media/media/frame_right.png</normaloff>:/media/media/frame_right.png</iconset>
              </property>
              <property name="flat">
               <bool>true</bool>
