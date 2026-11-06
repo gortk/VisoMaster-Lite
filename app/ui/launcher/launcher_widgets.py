@@ -1,6 +1,6 @@
 # launcher_widgets.py
 # ---------------------------------------------------------------------------
-# UI Widgets for VisoMaster Fusion Launcher
+# UI Widgets for VisoMaster Lite Launcher
 # ---------------------------------------------------------------------------
 # Defines reusable visual elements and custom controls for the launcher.
 # Keeps styling and interaction logic separate from layout construction.
