@@ -219,9 +219,8 @@ class VideoProcessor(QObject):
 
         # --- Signal Connections ---
         self.frame_processed_signal.connect(self.store_frame_to_display)
-        self.webcam_frame_processed_signal.connect(self.store_webcam_frame_to_display)
-        self.single_frame_processed_signal.connect(self.display_current_frame)
         self.single_frame_processed_signal.connect(self.store_single_frame_to_display)
+        self.single_frame_processed_signal.connect(self.display_current_frame)
         self.fatal_processing_error_signal.connect(self._handle_fatal_processing_error)
 
     @property
@@ -353,6 +352,12 @@ class VideoProcessor(QObject):
 
     def store_frame_to_display(self, frame_number: int, frame: numpy.ndarray) -> None:
         """Facade: Routes finished frames to the MediaPipeline."""
+        # Let extensions modify the frame before it is displayed or written to FFmpeg
+        if hasattr(self.main_window, "extension_manager"):
+            self.main_window.extension_manager.trigger_hook(
+                "on_frame_processed", frame
+            )
+
         self.media_pipeline.store_frame_to_display(frame_number, frame)
 
     def store_webcam_frame_to_display(self, frame: numpy.ndarray) -> None:

@@ -7,6 +7,7 @@ from PySide6 import QtWidgets, QtGui
 from PySide6 import QtCore
 import torch
 
+from app.helpers.extension_manager import ExtensionManager
 from app.ui.core.main_window import Ui_MainWindow
 import app.ui.widgets.actions.common_actions as common_widget_actions
 from app.ui.widgets.actions import card_actions
@@ -926,6 +927,8 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
         self._apply_runtime_window_title()
         self.initialize_widgets()
         self.load_last_workspace()
+        self.extension_manager = ExtensionManager(self)
+        self.extension_manager.load_all()
 
     @QtCore.Slot(list)
     def handle_unload_request(self, model_names: list):
@@ -1042,6 +1045,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
                 self, str(self.last_workspace_path)
             )
         self.video_processor.join_and_clear_threads()
+        self.extension_manager.trigger_hook("on_app_close")
         # Optionally handle the event if needed
         event.accept()
 
