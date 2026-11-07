@@ -1445,7 +1445,7 @@ class MediaPipeline(QObject):
                 args,
                 capture_output=True,
                 text=True,
-                timeout=15,
+                timeout=5,
                 check=False,
             )
             if result.returncode != 0:

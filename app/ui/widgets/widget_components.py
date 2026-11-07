@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, Any, Dict, List
 from send2trash import send2trash
 import subprocess
 import sys
-import time
+
 
 from PySide6 import QtWidgets, QtGui, QtCore
 from PySide6.QtWidgets import QPushButton
@@ -28,6 +28,10 @@ from app.helpers.miscellaneous import get_video_rotation
 if TYPE_CHECKING:
     from app.ui.main_ui import MainWindow
 
+def _invalidate_kv_merge_cache(main_window):
+    cache = getattr(main_window, "_kv_merge_cache", None)
+    if cache is not None:
+        cache.clear()
 
 class TwoLineElidedLabel(QtWidgets.QLabel):
     def __init__(self, text: str = "", parent=None):
@@ -337,12 +341,15 @@ class TargetMediaCardButton(CardButton):
             self._restore_pre_click_checked_state()
             return
 
-        # Deselect the currently selected video
-        if main_window.selected_video_button:
-            main_window.selected_video_button.toggle()  # Deselect the previous video
+        # Deselect the previous video (skip if already selected — prevents a
+        # deselect cascade that zeroes the shared processor state)
+        if (
+            main_window.selected_video_button
+            and main_window.selected_video_button is not self
+        ):
+            main_window.selected_video_button.toggle()
             main_window.selected_video_button = False
 
-        # Stop the current video processing
         main_window.video_processor.stop_processing()
         main_window.video_processor._clear_single_frame_preview_caches()
 
@@ -351,53 +358,48 @@ class TargetMediaCardButton(CardButton):
                 main_window.selected_target_face_id
             ].copy()
 
-        # Reset the frame counter
         main_window.video_processor.current_frame_number = 0
         main_window.video_processor.media_path = self.media_path
         main_window.parameters = {}
         main_window.selected_target_face_id = None
         main_window.video_processor.current_frame = []
 
-        # Release the previous media_capture if it exists
         if main_window.video_processor.media_capture:
             main_window.video_processor.media_capture.release()
 
         frame = None
-        max_frames_number = 0  # Initialize max_frames_number for either video or image
-        rotation_angle = 0  # MODIFICATION: Added rotation variable
+        max_frames_number = 0
+        rotation_angle = 0
 
         if self.file_type == "video":
-            # Get video rotation metadata before loading
             rotation_angle = get_video_rotation(self.media_path)
-            # Check for Variable Frame Rate (VFR) and warn the user
-            vfr_start = time.perf_counter()
             misc_helpers.check_and_warn_vfr(self.media_path)
-            print(
-                f"[INFO] Media Load [1/3]: Variable Frame Rate (VFR) validation completed in "
-                f"{time.perf_counter() - vfr_start:.3f}s for '{self.media_path}'."
-            )
             main_window.video_processor.media_rotation = rotation_angle
-            open_start = time.perf_counter()
-            media_capture = cv2.VideoCapture(self.media_path)
-            print(
-                f"[INFO] Media Load [2/3]: OpenCV VideoCapture initialization completed in "
-                f"{time.perf_counter() - open_start:.3f}s for '{self.media_path}'."
-            )
-            # Explicitly enable OpenCV's auto-rotation to let it handle metadata natively
+
+            media_capture = cv2.VideoCapture(self.media_path, cv2.CAP_FFMPEG)
+            if not media_capture.isOpened():
+                media_capture.release()
+                media_capture = cv2.VideoCapture(self.media_path)
             if hasattr(cv2, "CAP_PROP_ORIENTATION_AUTO"):
                 media_capture.set(cv2.CAP_PROP_ORIENTATION_AUTO, 1)
             if not media_capture.isOpened():
                 print(f"[ERROR] Error opening video {self.media_path}")
-                return  # If the video cannot be opened, exit the function
+                return
 
             media_capture.set(cv2.CAP_PROP_POS_FRAMES, 0)
-            max_frames_number = int(media_capture.get(cv2.CAP_PROP_FRAME_COUNT)) - 1
-            read_start = time.perf_counter()
-            _, frame = misc_helpers.read_frame(media_capture, rotation_angle)
-            print(
-                f"[INFO] Media Load [3/3]: First frame decoded and read into memory in "
-                f"{time.perf_counter() - read_start:.3f}s for '{self.media_path}'."
+            max_frames_number = (
+                int(media_capture.get(cv2.CAP_PROP_FRAME_COUNT)) - 1
             )
+            if max_frames_number <= 0:
+                print(
+                    f"[ERROR] Could not determine frame count for {self.media_path}. "
+                    f"Video cannot be loaded."
+                )
+                media_capture.release()
+                return
+
+            _, frame = misc_helpers.read_frame(media_capture, rotation_angle)
+
             main_window.video_processor.media_capture = media_capture
             self.media_capture = media_capture
             main_window.video_processor.fps = media_capture.get(cv2.CAP_PROP_FPS)
@@ -407,13 +409,8 @@ class TargetMediaCardButton(CardButton):
 
         elif self.file_type == "image":
             frame = misc_helpers.read_image_file(self.media_path)
-            max_frames_number = 0  # For an image, there is only one "frame"
+            max_frames_number = 0
             main_window.video_processor.max_frame_number = max_frames_number
-
-            if self.file_type == "video":
-                # restore initial video position after reading. == 0
-                media_capture.set(cv2.CAP_PROP_POS_FRAMES, 0)
-
             main_window.video_processor.current_frame = frame
             pixmap = common_widget_actions.get_pixmap_from_frame(main_window, frame)
             graphics_view_actions.update_graphics_view(
@@ -423,30 +420,22 @@ class TargetMediaCardButton(CardButton):
         self.reset_related_widgets_and_values()
 
         main_window.video_processor.file_type = self.file_type
-        main_window.videoSeekSlider.blockSignals(
-            True
-        )  # Block signals to prevent unnecessary updates
+        main_window.videoSeekSlider.blockSignals(True)
         main_window.videoSeekSlider.setMaximum(max_frames_number)
-        main_window.videoSeekSlider.setValue(0)  # Set the slider to 0 for the new video
-        main_window.videoSeekSlider.blockSignals(False)  # Unblock signals
+        main_window.videoSeekSlider.setValue(0)
+        main_window.videoSeekSlider.blockSignals(False)
 
-        # --- FORCE TIMELINE & THUMBNAILS TO REFRESH ---
         main_window.videoSeekSlider.rangeChanged.emit(0, max_frames_number)
         if hasattr(main_window, "timelineContainer"):
             main_window.timelineContainer.thumbnail_track.request_thumbnails()
 
-        # Toggle UI elements visibility based on file type
         self._toggle_timeline_visibility(
             main_window, self.file_type in ["video", "webcam"]
         )
 
-        # Append the selected video button to the list
         main_window.selected_video_button = self
-
-        # Update the graphics frame after the reset
         main_window.graphicsViewFrame.update()
 
-        # Set Parameter widget values to default
         common_widget_actions.set_widgets_values_using_face_id_parameters(
             main_window=main_window, face_id=None
         )
@@ -455,7 +444,6 @@ class TargetMediaCardButton(CardButton):
         common_widget_actions.refresh_frame(main_window, synchronous=True)
 
         if main_window.control.get("AutoSwapToggle"):
-            # Run detect on 0 frame or image
             card_actions.find_target_faces(main_window)
             if main_window.target_faces and not main_window.selected_target_face_id:
                 list(main_window.target_faces.values())[0].click()
@@ -1050,40 +1038,62 @@ class TargetFaceCardButton(CardButton):
                         }
                 else:
                     merge_mode_str = "Averaging" if average_kv_maps else "Concatenating"
-                    print(
-                        f"[INFO] {merge_mode_str} K/V maps across {len(all_kv_maps)} prioritized sources..."
-                    )
-                    merged_kv_map: dict[str, dict[str, torch.Tensor]] = {}
-                    first_map = all_kv_maps[0]
+                    cache = getattr(main_window, "_kv_merge_cache", None)
+                    cache_key = (tuple(id(m) for m in all_kv_maps), average_kv_maps)
+                    cached = cache.get(cache_key) if cache is not None else None
+                    if cached is not None:
+                        print(
+                            f"[INFO] Reusing cached merged K/V map "
+                            f"({merge_mode_str}, {len(all_kv_maps)} sources)."
+                        )
+                        self.assigned_kv_map = cached
+                    else:
+                        print(
+                            f"[INFO] {merge_mode_str} K/V maps across "
+                            f"{len(all_kv_maps)} prioritized sources..."
+                        )
+                        merged_kv_map: dict[str, dict[str, torch.Tensor]] = {}
+                        first_map = all_kv_maps[0]
 
-                    for layer_key, layer_dict in first_map.items():
-                        merged_kv_map[layer_key] = {}
-                        for kv_key in layer_dict.keys():
-                            tensors_to_merge = []
-                            for m in all_kv_maps:
-                                if layer_key in m and kv_key in m[layer_key]:
-                                    tensors_to_merge.append(m[layer_key][kv_key])
-
-                            if tensors_to_merge:
-                                # Force all tensors onto the target VRAM device before operations
+                        for layer_key, layer_dict in first_map.items():
+                            merged_kv_map[layer_key] = {}
+                            for kv_key in layer_dict.keys():
                                 tensors_to_merge = [
-                                    t.to(target_device) for t in tensors_to_merge
+                                    m[layer_key][kv_key]
+                                    for m in all_kv_maps
+                                    if layer_key in m and kv_key in m[layer_key]
                                 ]
+                                if not tensors_to_merge:
+                                    continue
 
-                                # 3. DYNAMICALLY MERGE BASED ON THE TOGGLE
                                 if average_kv_maps:
-                                    stacked = torch.stack(tensors_to_merge, dim=0)
-                                    merged_tensor = torch.mean(stacked, dim=0)
+                                    # Running sum in fp32: ~2x peak instead of (N+1)x
+                                    acc = tensors_to_merge[0].to(
+                                        target_device, dtype=torch.float32
+                                    )
+                                    for t in tensors_to_merge[1:]:
+                                        acc += t.to(
+                                            target_device, dtype=torch.float32
+                                        )
+                                    merged_tensor = (
+                                        acc / len(tensors_to_merge)
+                                    ).to(tensors_to_merge[0].dtype)
                                 else:
-                                    # Concatenate along the sequence dimension (-1)
-                                    # to expand the attention window
-                                    merged_tensor = torch.cat(tensors_to_merge, dim=-1)
+                                    merged_tensor = torch.cat(
+                                        [
+                                            t.to(target_device)
+                                            for t in tensors_to_merge
+                                        ],
+                                        dim=-1,
+                                    )
 
                                 merged_kv_map[layer_key][kv_key] = merged_tensor
 
-                    self.assigned_kv_map = merged_kv_map
-            else:
-                self.assigned_kv_map = None
+                        self.assigned_kv_map = merged_kv_map
+                        if cache is not None:
+                            cache[cache_key] = merged_kv_map
+                            while len(cache) > 4:
+                                del cache[next(iter(cache))]
 
         if getattr(main_window, "selected_target_face_id", None) == getattr(
             self, "face_id", None
@@ -1271,10 +1281,8 @@ class TargetFaceCardButton(CardButton):
         )  # Remove parameters for the face from all markers
         common_widget_actions.refresh_frame(self.main_window)
 
-        # Explicitly release large data before Qt schedules widget destruction.
-        # KV maps can be 10-100 MB; embeddings are smaller but numpy arrays that
-        # benefit from prompt deallocation. deleteLater() only schedules the C++
-        # widget object; Python-side attributes survive until GC runs otherwise.
+        if getattr(main_window, "current_kv_tensors_map", None) is self.assigned_kv_map:
+            main_window.current_kv_tensors_map = None
         self.assigned_kv_map = None
         self.aged_kv_map = None
         self.assigned_input_embedding.clear()
@@ -1282,6 +1290,7 @@ class TargetFaceCardButton(CardButton):
         self.embedding_store.clear()
         self.assigned_input_faces.clear()
         self.assigned_merged_embeddings.clear()
+        _invalidate_kv_merge_cache(main_window)
 
         self.deleteLater()
         gc.collect()
@@ -1474,6 +1483,7 @@ class InputFaceCardButton(CardButton):
                 main_window.target_faces[target_face_id].remove_assigned_input_face(
                     self.face_id
                 )
+            _invalidate_kv_merge_cache(main_window)
             self.deleteLater()
             return True
         return False
@@ -1873,6 +1883,7 @@ class EmbeddingCardButton(CardButton):
                     main_window.target_faces[
                         target_face_id
                     ].remove_assigned_merged_embedding(self.embedding_id)
+        _invalidate_kv_merge_cache(main_window)
         common_widget_actions.refresh_frame(self.main_window)
         self.deleteLater()
 

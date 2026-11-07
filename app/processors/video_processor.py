@@ -155,6 +155,7 @@ class VideoProcessor(QObject):
         # is used to decide output->source frame mapping and restore logic
         # after finalization without relying on process-stop side effects.
         self._used_ffmpeg_cap: bool = False
+        self.finalization_in_progress: bool = False
         self.ffmpeg_input_prefetched_frame: Optional[numpy.ndarray] = None
         self.tail_pending_stall_start_sec: float = 0.0
         self.tail_force_finalize_due_to_stall: bool = False
@@ -2330,444 +2331,419 @@ class VideoProcessor(QObject):
                 self.media_pipeline.raw_frame_queue.queue.clear()
 
     def _finalize_default_style_recording(self):
-        """Finalizes a successful default-style recording (adds audio, cleans up)."""
+        """GUI entry point. Stops threads, then hands the FFmpeg mux to a worker."""
         print("[INFO] Finalizing default-style recording...")
-        temp_audio_dir: str | None = None
-        final_file_path = ""
-
-        # Check if processing stopped due to error limit
-        if self.stopped_by_error_limit:
-            print(
-                f"[WARN] Recording stopped due to excessive consecutive read errors ({self.consecutive_read_errors}). "
-                f"Output will be saved with '_incomplete' suffix. Total skipped frames: {self.total_skipped_frames}."
-            )
 
         try:
-            self.processing = False  # Stop metronome
+            self.processing = False
 
-            # 1. Stop timers and any residual audio subprocess
+            # 1. Stop timers and subprocesses
             self.gpu_memory_update_timer.stop()
             self.preroll_timer.stop()
             self.stop_live_sound()
             self._stop_recording_ffmpeg_input_stream()
 
-            # 2. Release capture early to unblock the feeder.
-            print("[INFO] Releasing media capture to unblock feeder thread...")
+            # 2. Release capture
             if self.media_capture:
                 misc_helpers.release_capture(self.media_capture)
                 self.media_capture = None
 
-            # 3. Wait for the producer threads to exit fully.
-            print("[INFO] Waiting for producer threads to complete...")
+            # 3. Wait for producer threads
             if self.feeder_thread and self.feeder_thread.is_alive():
                 self.feeder_thread.join(timeout=3.0)
-                if self.feeder_thread.is_alive():
-                    print(
-                        "[WARN] Feeder thread did not exit cleanly during finalization."
-                    )
             self.feeder_thread = None
-
             if self.detector_thread and self.detector_thread.is_alive():
                 self.detector_thread.join(timeout=3.0)
-                if self.detector_thread.is_alive():
-                    print(
-                        "[WARN] Detector thread did not exit cleanly during finalization."
-                    )
             self.detector_thread = None
-            print("[INFO] Producer threads joined.")
 
-            # 4. Clear buffers and join worker threads.
+            # 4. Clear buffers and join worker threads
             self._purge_queues_and_buffers()
-
-            print("[INFO] Waiting for final worker threads...")
             self.join_and_clear_threads()
-            print("[INFO] Worker threads joined.")
 
-            # 5. Finalize FFmpeg (close stdin, wait for file to be written)
+            # 5. Close FFmpeg encoder (waits for ffmpeg to flush to disk)
             if self.encoder.is_running():
-                print("[INFO] Closing FFmpeg encoder...")
-                # VP-29: Mark recording stopped early.
                 self.recording = False
-
-                # Safely close the pipe and wait for the file to finalize
                 self.encoder.close_process()
-
-                # VP-HEVC-INFO: Notify the user about Windows Explorer thumbnail
-                # support for HEVC outputs. Default codec is hevc_nvenc / libx265.
                 self._log_hevc_thumbnail_hint_once()
 
-            # 6. Calculate audio segment times.
+            # 6. Timing snapshot
             self.play_end_time, end_frame_for_calc, _, duration_probed = (
                 self._compute_play_end()
             )
-            actual_frames_processed = max(0, int(self.frames_written))
-            # Compute source span duration (in seconds). When FPS-cap (FFmpeg input)
-            # is active, the end_frame_for_calc is in output-frame space, so map
-            # it back to source-frame space before computing duration using
-            # recording_source_fps.
-            processing_start_src = getattr(self, "processing_start_frame", 0) or 0
-            if self._used_ffmpeg_cap and self.recording_source_fps > 0 and self.fps > 0:
-                source_end_frame = self.output_to_source_frame(end_frame_for_calc)
-                source_span_duration = max(
-                    0.0,
-                    float(
-                        (source_end_frame - processing_start_src)
-                        / float(self.recording_source_fps)
-                    ),
+
+            _state = {
+                "temp_file": self.temp_file,
+                "media_path": self.media_path,
+                "play_start_time": self.play_start_time,
+                "play_end_time": self.play_end_time,
+                "end_frame_for_calc": end_frame_for_calc,
+                "duration_probed": duration_probed,
+                "total_skipped_frames": self.total_skipped_frames,
+                "manual_dropped_skip_count": self.manual_dropped_skip_count,
+                "read_error_skip_count": self.read_error_skip_count,
+                "processing_start_frame": getattr(
+                    self, "processing_start_frame", 0
                 )
-            else:
-                source_span_duration = (
-                    max(
-                        0.0,
-                        float(
-                            (end_frame_for_calc - processing_start_src)
-                            / float(self.fps)
-                            if self.fps > 0
-                            else 0.0
-                        ),
-                    )
-                    if self.fps > 0
-                    else 0.0
-                )
-            encoded_duration = (
-                float(actual_frames_processed / float(self.fps))
-                if self.fps > 0
-                else 0.0
+                or 0,
+                "recording_source_fps": self.recording_source_fps,
+                "fps": self.fps,
+                "last_displayed_frame": self.last_displayed_frame,
+                "stopped_by_error_limit": self.stopped_by_error_limit,
+                "consecutive_read_errors": self.consecutive_read_errors,
+                "skipped_frames": sorted(self.skipped_frames),
+                "triggered_by_job_manager": getattr(
+                    self, "triggered_by_job_manager", False
+                ),
+                "job_name": getattr(self.main_window, "current_job_name", None),
+                "use_job_name_for_output": getattr(
+                    self.main_window, "use_job_name_for_output", False
+                ),
+                "output_file_name": getattr(
+                    self.main_window, "output_file_name", None
+                ),
+                "active_output_folder": getattr(
+                    self, "active_output_folder", ""
+                ),
+            }
+
+            # Ownership of temp_file transfers to the worker.
+            self.temp_file = ""
+            self.finalization_in_progress = True
+
+            self.main_window.ui_task_runner.submit(
+                self._default_style_merge_worker,
+                _state,
+                on_done=lambda r: self._finalize_default_style_finish(_state, r),
+                on_err=lambda e: (
+                    print(f"[ERROR] Audio merge worker failed: {e}"),
+                    __import__("traceback").print_exc(),
+                    self._finalize_default_style_finish(_state, None),
+                ),
             )
-            print(
-                f"[INFO] Calculated recording end time: {self.play_end_time:.3f}s "
-                f"(Frame {end_frame_for_calc}, skipped {self.total_skipped_frames}, "
-                f"actual {actual_frames_processed})"
-            )
-            print(
-                "[INFO] Recording duration diagnostics: "
-                f"source_span={source_span_duration:.3f}s, "
-                f"encoded_from_frames={encoded_duration:.3f}s, "
-                f"temp_video_probe={duration_probed:.3f}s"
-                if duration_probed is not None
-                else "[INFO] Recording duration diagnostics: "
-                f"source_span={source_span_duration:.3f}s, "
-                f"encoded_from_frames={encoded_duration:.3f}s, "
-                "temp_video_probe=unavailable"
-            )
-
-            # 7a. Audio Merging
-            if self.play_end_time <= self.play_start_time:
-                print("[WARN] Recording produced no frames. Skipping audio merge.")
-                common_widget_actions.create_and_show_toast_message(
-                    self.main_window,
-                    "No Video Created",
-                    "Recording produced no frames, so no video file was saved.",
-                    style_type="warning",
-                )
-                if self.temp_file and os.path.exists(self.temp_file):
-                    try:
-                        os.remove(self.temp_file)
-                    except OSError:
-                        pass
-                self.temp_file = ""
-            elif (
-                self.temp_file
-                and os.path.exists(self.temp_file)
-                and os.path.getsize(self.temp_file) > 0
-            ):
-                # 5a. Determine final output path
-                was_triggered_by_job = getattr(self, "triggered_by_job_manager", False)
-                job_name = (
-                    getattr(self.main_window, "current_job_name", None)
-                    if was_triggered_by_job
-                    else None
-                )
-                use_job_name = (
-                    getattr(self.main_window, "use_job_name_for_output", False)
-                    if was_triggered_by_job
-                    else False
-                )
-                output_file_name = (
-                    getattr(self.main_window, "output_file_name", None)
-                    if was_triggered_by_job
-                    else None
-                )
-
-                job_name, output_file_name = self._apply_job_timestamp_to_output_name(
-                    was_triggered_by_job,
-                    job_name,
-                    use_job_name,
-                    output_file_name,
-                )
-
-                output_folder = (
-                    str(getattr(self, "active_output_folder", "") or "").strip()
-                    or str(
-                        self.main_window.control.get("OutputMediaFolder", "")
-                    ).strip()
-                )
-
-                final_file_path = misc_helpers.get_output_file_path(
-                    self.media_path,
-                    output_folder,
-                    job_name=job_name,
-                    use_job_name_for_output=use_job_name,
-                    output_file_name=output_file_name,
-                )
-
-                # Add suffix only for real read-error stops (not tail-drain timeout force-finalize).
-                has_real_read_errors = (
-                    int(self.read_error_skip_count) > 0
-                    or int(self.consecutive_read_errors) > 0
-                )
-                if self.stopped_by_error_limit and has_real_read_errors:
-                    path_obj = Path(final_file_path)
-                    final_file_path = str(
-                        path_obj.parent / f"{path_obj.stem}_incomplete{path_obj.suffix}"
-                    )
-                    print(
-                        f"[WARN] Output marked as incomplete due to excessive read errors: {final_file_path}"
-                    )
-
-                output_dir = os.path.dirname(final_file_path)
-                if output_dir and not os.path.exists(output_dir):
-                    os.makedirs(output_dir, exist_ok=True)
-
-                if Path(final_file_path).is_file():
-                    try:
-                        os.remove(final_file_path)
-                    except OSError:
-                        pass
-
-                # 7b. Run FFmpeg audio merge command
-                print("[INFO] Adding audio (default-style merge)...")
-                try:
-                    if self.total_skipped_frames > 0:
-                        print(
-                            "[INFO] Rebuilding audio because frames were skipped "
-                            f"(manual dropped={self.manual_dropped_skip_count}, read errors={self.read_error_skip_count})."
-                        )
-                        temp_audio_root = os.path.join(
-                            os.path.dirname(self.temp_file), "temp_audio"
-                        )
-                        temp_audio_dir = os.path.join(
-                            temp_audio_root,
-                            f"{Path(self.temp_file).stem}_{uuid.uuid4().hex}",
-                        )
-                        os.makedirs(temp_audio_dir, exist_ok=True)
-
-                        # Convert skipped frame map into keep-ranges, then extract and concat audio.
-                        start_frame_for_calc = (
-                            getattr(self, "processing_start_frame", 0) or 0
-                        )
-                        actual_end_frame = (
-                            self.last_displayed_frame
-                            if self.last_displayed_frame is not None
-                            else end_frame_for_calc - 1
-                        )
-                        if actual_end_frame < start_frame_for_calc:
-                            raise RuntimeError(
-                                f"invalid frame boundaries: start={start_frame_for_calc}, end={actual_end_frame}"
-                            )
-                        segments = self._identify_frame_segments(actual_end_frame)
-                        audio_ok, audio_files = (
-                            FFmpegPostProcessor.extract_audio_segments(
-                                media_path=str(self.media_path),
-                                fps=self.recording_source_fps,
-                                segments=segments,
-                                temp_audio_dir=temp_audio_dir,
-                                frame_origin=start_frame_for_calc,
-                                time_offset_sec=self.play_start_time,
-                            )
-                        )
-                        if not audio_ok or not audio_files:
-                            raise RuntimeError("failed to extract segmented audio")
-
-                        final_audio_path = (
-                            FFmpegPostProcessor.concatenate_audio_segments(
-                                audio_files=audio_files, temp_audio_dir=temp_audio_dir
-                            )
-                        )
-                        if not final_audio_path:
-                            raise RuntimeError("failed to concatenate segmented audio")
-
-                        args = [
-                            "ffmpeg",
-                            "-hide_banner",
-                            "-loglevel",
-                            "error",
-                            "-i",
-                            self.temp_file,
-                            "-i",
-                            final_audio_path,
-                            "-c:v",
-                            "copy",
-                            "-c:a",
-                            "copy",
-                            "-map",
-                            "0:v:0",
-                            "-map",
-                            "1:a:0",
-                            "-shortest",
-                            final_file_path,
-                        ]
-                    else:
-                        args = [
-                            "ffmpeg",
-                            "-hide_banner",
-                            "-loglevel",
-                            "error",
-                            "-i",
-                            self.temp_file,
-                            "-ss",
-                            str(self.play_start_time),
-                            "-to",
-                            str(self.play_end_time),
-                            "-i",
-                            self.media_path,
-                            "-c:v",
-                            "copy",
-                            "-c:a",
-                            "aac",
-                            "-map",
-                            "0:v:0",
-                            "-map",
-                            "1:a:0?",
-                            "-shortest",
-                            # REMOVED: "-af", "aresample=async=1000" (Breaks CFR sync and incompatible with -c:a copy)
-                            final_file_path,
-                        ]
-
-                    subprocess.run(args, check=True)
-                    final_output_duration = self._probe_video_duration(final_file_path)
-                    if final_output_duration is not None:
-                        print(
-                            f"[INFO] Final output duration probe: {final_output_duration:.3f}s"
-                        )
-                    else:
-                        print("[INFO] Final output duration probe: unavailable")
-
-                    print(
-                        f"[INFO] --- Successfully created final video: {final_file_path} ---"
-                    )
-                    common_widget_actions.create_and_show_toast_message(
-                        self.main_window,
-                        "Video Saved",
-                        f"Saved video to file: {final_file_path}",
-                    )
-                except Exception as e:
-                    print(f"[ERROR] Audio merge failed: {e}")
-                    if self.temp_file and os.path.exists(self.temp_file):
-                        print(
-                            "[WARN] Falling back to video-only output for default-style recording."
-                        )
-                        if FFmpegPostProcessor.write_video_only_output(
-                            source_video=self.temp_file, output_video=final_file_path
-                        ):
-                            print(
-                                f"[INFO] --- Video-only fallback succeeded: {final_file_path} ---"
-                            )
-                            common_widget_actions.create_and_show_toast_message(
-                                self.main_window,
-                                "Video Saved",
-                                f"Saved video to file (without audio): {final_file_path}",
-                            )
-                        else:
-                            self.main_window.display_messagebox_signal.emit(
-                                "Recording Error",
-                                f"Audio merge failed and video-only fallback also failed:\n{e}",
-                                self.main_window,
-                            )
-                finally:
-                    if self.temp_file and os.path.exists(self.temp_file):
-                        try:
-                            os.remove(self.temp_file)
-                        except OSError:
-                            pass
-                    self.temp_file = ""
-                    if temp_audio_dir and os.path.isdir(temp_audio_dir):
-                        try:
-                            shutil.rmtree(temp_audio_dir, ignore_errors=True)
-                        except OSError:
-                            pass
-                    temp_audio_dir = None
-
-            # 8a. Final Timing and Logging
-            self.end_time = time.perf_counter()
-            processing_time_sec = self.end_time - self.start_time
-
-            try:
-                # Fetch the absolute frames from the media pipeline for accurate FPS math
-                num_frames_processed = getattr(
-                    self.media_pipeline, "absolute_frames_processed", 0
-                )
-            except Exception:
-                num_frames_processed = 0
-
-            self._log_processing_summary(processing_time_sec, num_frames_processed)
-
-            self._auto_save_workspace_for_output(final_file_path)
-
-            # 8b. Reopen media capture AFTER FFmpeg audio merge.
-            if self.file_type == "video" and self.media_path:
-                last_processed = self.next_frame_to_display - 1
-                start_frame = getattr(self, "processing_start_frame", 0)
-                if (
-                    self._used_ffmpeg_cap
-                    and self.fps > 0
-                    and self.recording_source_fps > 0
-                ):
-                    last_processed = self.output_to_source_frame(last_processed)
-                reset_frame = max(start_frame, last_processed)
-                # Slider stays in source frame space (approach 2).
-                # If FPS-cap recording was active, map output frame -> source frame before seek.
-                src_slider_max = self.main_window.videoSeekSlider.maximum()
-                reset_frame = min(reset_frame, src_slider_max)
-
-                if self._reopen_video_capture(reset_frame):
-                    # Restore max_frame_number/fps to source space after FPS-cap recording.
-                    self._restore_source_frame_state_after_capture_reopen()
-                    self.main_window.videoSeekSlider.blockSignals(True)
-                    self.main_window.videoSeekSlider.setValue(reset_frame)
-                    self.main_window.videoSeekSlider.blockSignals(False)
-                else:
-                    print("[WARN] Failed to re-open media capture after recording.")
-
         except Exception as e:
-            print(f"[ERROR] Exception during _finalize_default_style_recording: {e}")
+            print(f"[ERROR] _finalize_default_style_recording setup: {e}")
+            import traceback
 
-        finally:
-            # 10. Reset State and UI
-            self.recording = False
-            self.processing = False
-            self.is_processing_segments = False
-            self._used_ffmpeg_cap = False
-            self.tail_pending_stall_start_sec = 0.0
-            self.tail_force_finalize_due_to_stall = False
+            traceback.print_exc()
+            self._finalize_default_style_reset()
 
-            layout_actions.enable_all_parameters_and_control_widget(self.main_window)
-            video_control_actions.reset_media_buttons(self.main_window)
+    def _default_style_merge_worker(self, state):
+        """Worker thread: runs the FFmpeg audio-merge subprocess. No GUI access."""
+        from pathlib import Path
 
-            print("[INFO] Clearing GPU Cache.")
-            try:
-                if torch.cuda.is_available() and torch.cuda.is_initialized():
-                    torch.cuda.empty_cache()
-            except Exception:
-                pass
-            gc.collect()
+        temp_file = state["temp_file"]
+        final_file_path = ""
+        success = False
+        temp_audio_dir = None
 
-            try:
-                self.disable_virtualcam()
-            except Exception:
-                pass
+        if not temp_file or not os.path.exists(temp_file):
+            return {"success": False, "final_path": "", "reason": "no_temp_file"}
 
-            if (
-                self.main_window.control.get("OpenOutputToggle")
-                and not self.triggered_by_job_manager
-            ):
+        try:
+            job_name = (
+                state["job_name"] if state["triggered_by_job_manager"] else None
+            )
+            use_job_name = (
+                state["use_job_name_for_output"]
+                if state["triggered_by_job_manager"]
+                else False
+            )
+            output_file_name = (
+                state["output_file_name"]
+                if state["triggered_by_job_manager"]
+                else None
+            )
+            job_name, output_file_name = self._apply_job_timestamp_to_output_name(
+                state["triggered_by_job_manager"],
+                job_name,
+                use_job_name,
+                output_file_name,
+            )
+
+            output_folder = (
+                state["active_output_folder"]
+                or str(self.main_window.control.get("OutputMediaFolder", "")).strip()
+            )
+
+            final_file_path = misc_helpers.get_output_file_path(
+                state["media_path"],
+                output_folder,
+                job_name=job_name,
+                use_job_name_for_output=use_job_name,
+                output_file_name=output_file_name,
+            )
+
+            has_real_read_errors = (
+                int(state["read_error_skip_count"]) > 0
+                or int(state["consecutive_read_errors"]) > 0
+            )
+            if state["stopped_by_error_limit"] and has_real_read_errors:
+                p = Path(final_file_path)
+                final_file_path = str(
+                    p.parent / f"{p.stem}_incomplete{p.suffix}"
+                )
+
+            output_dir = os.path.dirname(final_file_path)
+            if output_dir and not os.path.exists(output_dir):
+                os.makedirs(output_dir, exist_ok=True)
+
+            if Path(final_file_path).is_file():
                 try:
-                    list_view_actions.open_output_media_folder(self.main_window)
-                except Exception:
+                    os.remove(final_file_path)
+                except OSError:
                     pass
 
-            print("[INFO] Default-style recording finalized.")
-            self.processing_stopped_signal.emit()
+            if state["play_end_time"] <= state["play_start_time"]:
+                return {
+                    "success": False,
+                    "final_path": "",
+                    "reason": "no_frames",
+                }
+
+            print("[INFO] Adding audio (default-style merge)...")
+            try:
+                if state["total_skipped_frames"] > 0:
+                    print(
+                        "[INFO] Rebuilding audio because frames were skipped "
+                        f"(manual dropped={state['manual_dropped_skip_count']}, "
+                        f"read errors={state['read_error_skip_count']})."
+                    )
+                    temp_audio_root = os.path.join(
+                        os.path.dirname(temp_file), "temp_audio"
+                    )
+                    temp_audio_dir = os.path.join(
+                        temp_audio_root,
+                        f"{Path(temp_file).stem}_{uuid.uuid4().hex}",
+                    )
+                    os.makedirs(temp_audio_dir, exist_ok=True)
+
+                    start_frame_for_calc = state["processing_start_frame"]
+                    actual_end_frame = (
+                        state["last_displayed_frame"]
+                        if state["last_displayed_frame"] is not None
+                        else state["end_frame_for_calc"] - 1
+                    )
+                    if actual_end_frame < start_frame_for_calc:
+                        raise RuntimeError(
+                            f"invalid frame boundaries: "
+                            f"start={start_frame_for_calc}, end={actual_end_frame}"
+                        )
+
+                    # Reconstruct skipped-frame segments
+                    start_frame = start_frame_for_calc
+                    segments = []
+                    last_skipped = None
+                    for sf in state["skipped_frames"]:
+                        if sf < start_frame or sf > actual_end_frame:
+                            continue
+                        if sf > start_frame:
+                            segments.append((start_frame, sf - 1))
+                        start_frame = sf + 1
+                        last_skipped = sf
+                    if start_frame <= actual_end_frame:
+                        segments.append((start_frame, actual_end_frame))
+
+                    if not segments:
+                        segments = [(start_frame_for_calc, actual_end_frame)]
+
+                    audio_ok, audio_files = (
+                        FFmpegPostProcessor.extract_audio_segments(
+                            media_path=str(state["media_path"]),
+                            fps=state["recording_source_fps"],
+                            segments=segments,
+                            temp_audio_dir=temp_audio_dir,
+                            frame_origin=start_frame_for_calc,
+                            time_offset_sec=state["play_start_time"],
+                        )
+                    )
+                    if not audio_ok or not audio_files:
+                        raise RuntimeError("failed to extract segmented audio")
+
+                    final_audio_path = (
+                        FFmpegPostProcessor.concatenate_audio_segments(
+                            audio_files=audio_files,
+                            temp_audio_dir=temp_audio_dir,
+                        )
+                    )
+                    if not final_audio_path:
+                        raise RuntimeError("failed to concatenate segmented audio")
+
+                    args = [
+                        "ffmpeg",
+                        "-hide_banner",
+                        "-loglevel",
+                        "error",
+                        "-i",
+                        temp_file,
+                        "-i",
+                        final_audio_path,
+                        "-c:v",
+                        "copy",
+                        "-c:a",
+                        "copy",
+                        "-map",
+                        "0:v:0",
+                        "-map",
+                        "1:a:0",
+                        "-shortest",
+                        final_file_path,
+                    ]
+                else:
+                    args = [
+                        "ffmpeg",
+                        "-hide_banner",
+                        "-loglevel",
+                        "error",
+                        "-i",
+                        temp_file,
+                        "-ss",
+                        str(state["play_start_time"]),
+                        "-to",
+                        str(state["play_end_time"]),
+                        "-i",
+                        state["media_path"],
+                        "-c:v",
+                        "copy",
+                        "-c:a",
+                        "aac",
+                        "-map",
+                        "0:v:0",
+                        "-map",
+                        "1:a:0?",
+                        "-shortest",
+                        final_file_path,
+                    ]
+
+                subprocess.run(args, check=True)
+                success = True
+
+                final_dur = self._probe_video_duration(final_file_path)
+                if final_dur is not None:
+                    print(
+                        f"[INFO] Final output duration probe: {final_dur:.3f}s"
+                    )
+            except Exception as e:
+                print(f"[ERROR] Audio merge failed: {e}")
+                if FFmpegPostProcessor.write_video_only_output(
+                    source_video=temp_file, output_video=final_file_path
+                ):
+                    success = True
+                    print(
+                        f"[INFO] --- Video-only fallback succeeded: "
+                        f"{final_file_path} ---"
+                    )
+            finally:
+                if temp_audio_dir and os.path.isdir(temp_audio_dir):
+                    try:
+                        shutil.rmtree(temp_audio_dir, ignore_errors=True)
+                    except OSError:
+                        pass
+                if os.path.exists(temp_file):
+                    try:
+                        os.remove(temp_file)
+                    except OSError:
+                        pass
+                temp_audio_dir = None
+
+            return {"success": success, "final_path": final_file_path}
+        except Exception as e:
+            print(f"[ERROR] Merge worker: {e}")
+            import traceback
+
+            traceback.print_exc()
+            return {"success": False, "final_path": final_file_path}
+
+    def _finalize_default_style_finish(self, state, result):
+        """GUI thread: post-merge cleanup, capture reopen, UI reset."""
+        success = bool(result and result.get("success"))
+        final_file_path = (result or {}).get("final_path", "")
+        reason = (result or {}).get("reason")
+
+        if success:
+            self._auto_save_workspace_for_output(final_file_path)
+            common_widget_actions.create_and_show_toast_message(
+                self.main_window,
+                "Video Saved",
+                f"Saved video to file: {final_file_path}",
+            )
+        elif reason == "no_frames":
+            common_widget_actions.create_and_show_toast_message(
+                self.main_window,
+                "No Video Created",
+                "Recording produced no frames, so no video file was saved.",
+                style_type="warning",
+            )
+
+        self.end_time = time.perf_counter()
+        processing_time_sec = self.end_time - self.start_time
+        try:
+            num_frames = getattr(
+                self.media_pipeline, "absolute_frames_processed", 0
+            )
+        except Exception:
+            num_frames = 0
+        self._log_processing_summary(processing_time_sec, num_frames)
+
+        if self.file_type == "video" and self.media_path:
+            last_processed = self.next_frame_to_display - 1
+            start_frame = state["processing_start_frame"]
+            if (
+                self._used_ffmpeg_cap
+                and self.fps > 0
+                and self.recording_source_fps > 0
+            ):
+                last_processed = self.output_to_source_frame(last_processed)
+            reset_frame = max(start_frame, last_processed)
+            src_slider_max = self.main_window.videoSeekSlider.maximum()
+            reset_frame = min(reset_frame, src_slider_max)
+
+            if self._reopen_video_capture(reset_frame):
+                self._restore_source_frame_state_after_capture_reopen()
+                self.main_window.videoSeekSlider.blockSignals(True)
+                self.main_window.videoSeekSlider.setValue(reset_frame)
+                self.main_window.videoSeekSlider.blockSignals(False)
+            else:
+                print("[WARN] Failed to re-open media capture after recording.")
+
+        self._finalize_default_style_reset()
+
+    def _finalize_default_style_reset(self):
+        """GUI thread: final state reset (idempotent)."""
+        self.recording = False
+        self.processing = False
+        self.is_processing_segments = False
+        self._used_ffmpeg_cap = False
+        self.tail_pending_stall_start_sec = 0.0
+        self.tail_force_finalize_due_to_stall = False
+        self.finalization_in_progress = False
+
+        layout_actions.enable_all_parameters_and_control_widget(self.main_window)
+        video_control_actions.reset_media_buttons(self.main_window)
+
+        print("[INFO] Clearing GPU Cache.")
+        try:
+            if torch.cuda.is_available() and torch.cuda.is_initialized():
+                torch.cuda.empty_cache()
+        except Exception:
+            pass
+        gc.collect()
+
+        try:
+            self.disable_virtualcam()
+        except Exception:
+            pass
+
+        if (
+            self.main_window.control.get("OpenOutputToggle")
+            and not self.triggered_by_job_manager
+        ):
+            try:
+                list_view_actions.open_output_media_folder(self.main_window)
+            except Exception:
+                pass
+
+        print("[INFO] Default-style recording finalized.")
+        self.processing_stopped_signal.emit()
 
     # --- Virtual Camera Methods ---
 

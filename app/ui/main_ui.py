@@ -20,7 +20,6 @@ from app.ui.widgets.actions import save_load_actions
 from app.ui.widgets.actions import list_view_actions
 from app.ui.widgets.actions import graphics_view_actions
 from app.ui.widgets.actions import preset_actions
-from app.ui.widgets.advanced_embedding_editor import EmbeddingGUI
 import app.ui.widgets.actions.control_actions as control_actions
 from app.processors.video_processor import VideoProcessor
 from app.processors.models_processor import ModelsProcessor
@@ -182,6 +181,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
         self.previous_kv_file_selection = ""
         self.current_kv_tensors_map: Dict[str, torch.Tensor] | None = None
         self.fixed_unet_model_name = "RefLDM_UNET_EXTERNAL_KV"
+        self._kv_merge_cache: dict[tuple, dict] = {}
 
         self.loaded_embedding_filename: str = ""
 
@@ -217,9 +217,18 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
         )
         self.last_seek_read_failed = False
         self.embedding_editor_window = None
+        self._workspace_load_done = False
+        self._deferred_show = False
+        self._loading_splash = None
+        self._splash_timeout = None
+        
+        from app.ui.widgets.actions.ui_tasks import TaskRunner
+        self.ui_task_runner = TaskRunner(self)
 
         # Set by the "Quit without Saving" action so closeEvent skips the autosave.
         self.quit_without_saving = False
+        self.preview_watermark = None
+        self._active_model_loads = 0
 
     def initialize_widgets(self):
         # Initialize QListWidget for target media
@@ -279,6 +288,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
         self.graphicsViewFrame.installEventFilter(graphics_event_filter)
 
         video_control_actions.enable_zoom_and_pan(self, self.graphicsViewFrame)
+        self._install_preview_watermark()
 
         # --- SWAP NATIVE SLIDER WITH COMPOSITE TIMELINE ---
         timeline_layout = self.verticalLayout_timeline
@@ -812,10 +822,12 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
         model_files.sort()
 
         selection_widget = self.parameter_widgets.get(widget_name)
-        if selection_widget and isinstance(
-            selection_widget, widget_components.SelectionBox
-        ):
-            current_selection = self.control.get(widget_name)
+        if not isinstance(selection_widget, widget_components.SelectionBox):
+            return
+
+        current_selection = self.control.get(widget_name)
+        blocker = QtCore.QSignalBlocker(selection_widget)
+        try:
             selection_widget.clear()
             if model_files:
                 selection_widget.addItems(model_files)
@@ -830,6 +842,8 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
                 selection_widget.addItem(placeholder)
                 self.control[widget_name] = ""
                 selection_widget.setCurrentText(placeholder)
+        finally:
+            del blocker
 
     def _populate_denoiser_unet_models(self):
         self._populate_model_file_selection_widget(
@@ -851,50 +865,60 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
     def handle_reference_kv_file_change(self, new_kv_file_name: str):
         self.control["ReferenceKVTensorsSelection"] = new_kv_file_name
         self.previous_kv_file_selection = new_kv_file_name
-        new_kv_tensors_map = None
-        if new_kv_file_name and new_kv_file_name != "No K/V tensor files found":
-            kv_file_path = (
-                self.actual_models_dir_path / "reference_kv_data" / new_kv_file_name
-            )
-            if kv_file_path.exists():
-                try:
-                    self.model_loading_signal.emit()
-                    kv_payload = torch.load(
-                        kv_file_path, map_location="cpu", weights_only=True
-                    )
-                    new_kv_tensors_map = kv_payload.get("kv_map")
-                    if new_kv_tensors_map:
-                        print(
-                            f"[INFO] Successfully loaded K/V map from {new_kv_file_name} for {len(new_kv_tensors_map)} layers."
-                        )
-                    else:
-                        print(f"[WARN] 'kv_map' not found in {new_kv_file_name}.")
-                        new_kv_tensors_map = None
-                    self.model_loaded_signal.emit()
-                except Exception as e:
-                    print(f"[ERROR] Error loading K/V tensor file {kv_file_path}: {e}")
-                    new_kv_tensors_map = None
-                    self.model_loaded_signal.emit()
+
+        if not new_kv_file_name or new_kv_file_name == "No K/V tensor files found":
+            with self.models_processor.model_lock:
+                self.current_kv_tensors_map = None
+            self._refresh_after_kv_load(False)
+            return
+
+        kv_file_path = (
+            self.actual_models_dir_path / "reference_kv_data" / new_kv_file_name
+        )
+        if not kv_file_path.exists():
+            print(f"[ERROR] K/V tensor file not found: {kv_file_path}")
+            with self.models_processor.model_lock:
+                self.current_kv_tensors_map = None
+            self._refresh_after_kv_load(False)
+            return
+
+        self.model_loading_signal.emit()
+
+        def _worker():
+            kv_payload = torch.load(kv_file_path, map_location="cpu", weights_only=True)
+            return kv_payload.get("kv_map")
+
+        def _finish(kv_map):
+            with self.models_processor.model_lock:
+                self.current_kv_tensors_map = kv_map
+            if kv_map:
+                print(
+                    f"[INFO] Successfully loaded K/V map from {new_kv_file_name} "
+                    f"for {len(kv_map)} layers."
+                )
             else:
-                print(f"[ERROR] K/V tensor file not found: {kv_file_path}")
-        with self.models_processor.model_lock:
-            self.current_kv_tensors_map = new_kv_tensors_map
+                print(f"[WARN] 'kv_map' not found in {new_kv_file_name}.")
+            self.model_loaded_signal.emit()
+            self._refresh_after_kv_load(bool(kv_map))
 
-        denoiser_enabled_before = self.control.get(
-            "DenoiserUNetEnableBeforeRestorersToggle", False
-        )
-        denoiser_enabled_after_first = self.control.get(
-            "DenoiserAfterFirstRestorerToggle", False
-        )
-        denoiser_enabled_after = self.control.get("DenoiserAfterRestorersToggle", False)
+        def _err(exc):
+            print(f"[ERROR] Error loading K/V tensor file {kv_file_path}: {exc}")
+            with self.models_processor.model_lock:
+                self.current_kv_tensors_map = None
+            self.model_loaded_signal.emit()
+            self._refresh_after_kv_load(False)
 
+        self.ui_task_runner.submit(_worker, on_done=_finish, on_err=_err)
+
+    def _refresh_after_kv_load(self, kv_loaded: bool):
+        if not kv_loaded:
+            return
         if (
-            denoiser_enabled_before
-            or denoiser_enabled_after_first
-            or denoiser_enabled_after
+            self.control.get("DenoiserUNetEnableBeforeRestorersToggle", False)
+            or self.control.get("DenoiserAfterFirstRestorerToggle", False)
+            or self.control.get("DenoiserAfterRestorersToggle", False)
         ):
-            if new_kv_file_name:
-                common_widget_actions.refresh_frame(self)
+            common_widget_actions.refresh_frame(self)
 
     @QtCore.Slot(str, str)
     def show_build_dialog(self, title, text):
@@ -953,20 +977,33 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
         common_widget_actions.update_gpu_memory_progressbar(self)
 
     def resizeEvent(self, event: QtGui.QResizeEvent):
-        # print("[INFO] Called resizeEvent()")
         super().resizeEvent(event)
         self._queue_media_controls_balance()
-        # Call the method to fit the image to the view whenever the window resizes
-        items = self.scene.items()
-        pixmap_item = next(
-            (item for item in items if isinstance(item, QtWidgets.QGraphicsPixmapItem)),
-            None,
-        )
-        if pixmap_item:
-            # Set the scene rectangle to the bounding rectangle of the pixmap
-            scene_rect = pixmap_item.boundingRect()
-            self.graphicsViewFrame.setSceneRect(scene_rect)
-            graphics_view_actions.fit_image_to_view(self, pixmap_item, scene_rect)
+        self._queue_resize_fit()
+
+    def _queue_resize_fit(self):
+        timer = getattr(self, "_resize_fit_timer", None)
+        if timer is None:
+            timer = QtCore.QTimer(self)
+            timer.setSingleShot(True)
+            timer.setInterval(40)
+            timer.timeout.connect(self._do_resize_fit)
+            self._resize_fit_timer = timer
+        timer.start()
+
+    def _do_resize_fit(self):
+        pixmap_item = getattr(self, "_base_pixmap_item", None)
+        if pixmap_item is None:
+            for item in self.scene.items():
+                if isinstance(item, QtWidgets.QGraphicsPixmapItem):
+                    pixmap_item = item
+                    self._base_pixmap_item = item
+                    break
+        if pixmap_item is None:
+            return
+        scene_rect = pixmap_item.boundingRect()
+        self.graphicsViewFrame.setSceneRect(scene_rect)
+        graphics_view_actions.fit_image_to_view(self, pixmap_item, scene_rect)
 
     def moveEvent(self, event: QtGui.QMoveEvent):
         super().moveEvent(event)
@@ -982,6 +1019,12 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
             and event.type() == QtCore.QEvent.Type.Resize
         ):
             self._queue_media_controls_balance()
+        if (
+            self.preview_watermark is not None
+            and watched is self.graphicsViewFrame.viewport()
+            and event.type() == QtCore.QEvent.Type.Resize
+        ):
+            self._position_preview_watermark()
         return super().eventFilter(watched, event)
 
     def _queue_media_controls_balance(self):
@@ -1001,6 +1044,92 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
             self.project_root_path, base_title
         )
         self.setWindowTitle(self.app_display_metadata.window_title)
+
+    def show(self):
+        """Defer the real show until the workspace has finished loading."""
+        if not getattr(self, "_workspace_load_done", True):
+            self._deferred_show = True
+            self._show_loading_splash()
+            return
+        super().show()
+
+    def _show_loading_splash(self) -> None:
+        if self._loading_splash is not None:
+            return
+        pixmap = QtGui.QPixmap(480, 220)
+        pixmap.fill(QtGui.QColor("#1a1a1a"))
+        painter = QtGui.QPainter(pixmap)
+        painter.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
+        painter.setPen(QtGui.QColor("#e0e0e0"))
+        title_font = QtGui.QFont("Segoe UI", 18)
+        title_font.setBold(True)
+        painter.setFont(title_font)
+        painter.drawText(
+            pixmap.rect().adjusted(0, 40, 0, 0),
+            QtCore.Qt.AlignmentFlag.AlignHCenter | QtCore.Qt.AlignmentFlag.AlignTop,
+            "VisoMaster Lite",
+        )
+        painter.setFont(QtGui.QFont("Segoe UI", 11))
+        painter.setPen(QtGui.QColor("#a0a0a0"))
+        painter.drawText(
+            pixmap.rect().adjusted(0, 100, 0, 0),
+            QtCore.Qt.AlignmentFlag.AlignHCenter | QtCore.Qt.AlignmentFlag.AlignTop,
+            "Loading workspace...",
+        )
+        painter.end()
+
+        splash = QtWidgets.QSplashScreen(pixmap)
+        splash.setWindowFlag(QtCore.Qt.WindowType.WindowStaysOnTopHint, True)
+        splash.setWindowFlag(QtCore.Qt.WindowType.FramelessWindowHint, True)
+        screen = QtWidgets.QApplication.primaryScreen().availableGeometry()
+        splash.move(screen.center() - splash.rect().center())
+        splash.show()
+        QtWidgets.QApplication.processEvents()
+        self._loading_splash = splash
+
+        self._splash_timeout = QtCore.QTimer(self)
+        self._splash_timeout.setSingleShot(True)
+        self._splash_timeout.setInterval(30000)
+        self._splash_timeout.timeout.connect(self._force_finish_splash)
+        self._splash_timeout.start()
+
+    def _hide_loading_splash(self) -> None:
+        if self._splash_timeout is not None:
+            try:
+                self._splash_timeout.stop()
+            except RuntimeError:
+                pass
+            self._splash_timeout = None
+        if self._loading_splash is not None:
+            try:
+                self._loading_splash.close()
+            except RuntimeError:
+                pass
+            self._loading_splash = None
+
+    def _force_finish_splash(self) -> None:
+        if self._workspace_load_done:
+            return
+        print(
+            "[WARN] Workspace load did not signal completion within 30s; "
+            "showing the window anyway."
+        )
+        self._on_workspace_load_finished()
+
+    def _on_workspace_load_finished(self) -> None:
+        if self._workspace_load_done:
+            return
+        self._workspace_load_done = True
+        self._hide_loading_splash()
+        if self._deferred_show:
+            self._deferred_show = False
+            super().show()
+            self.raise_()
+            self.activateWindow()
+        QtCore.QTimer.singleShot(
+            150, lambda: layout_actions.fit_image_to_view_onchange(self)
+        )
+
 
     def keyPressEvent(self, event):
         match event.key():
@@ -1030,6 +1159,46 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
             case QtCore.Qt.Key_S:
                 self.swapfacesButton.click()
 
+    def _install_preview_watermark(self):
+        viewport = self.graphicsViewFrame.viewport()
+        label = QtWidgets.QLabel(viewport)
+        label.setText("Loading…")
+        label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        font = label.font()
+        font.setPointSize(28)
+        font.setBold(True)
+        label.setFont(font)
+        label.setStyleSheet(
+            "color: rgba(220, 220, 220, 150);background: transparent;"
+        )
+        label.setAttribute(
+            QtCore.Qt.WidgetAttribute.WA_TransparentForMouseEvents, True
+        )
+        label.setGeometry(viewport.rect())
+        label.setVisible(False)
+        self.preview_watermark = label
+        viewport.installEventFilter(self)
+
+    def _position_preview_watermark(self):
+        if self.preview_watermark is None:
+            return
+        self.preview_watermark.setGeometry(
+            self.graphicsViewFrame.viewport().rect()
+        )
+    def _show_preview_watermark(self):
+        if self.preview_watermark is None:
+            return
+        self._position_preview_watermark()
+        self.preview_watermark.raise_()
+        self.preview_watermark.setVisible(True)
+
+    def _hide_preview_watermark(self):
+        if self.preview_watermark is None:
+            return
+        self.preview_watermark.setVisible(False)
+
+
+
     def closeEvent(self, event):
         print("[INFO] MainWindow: closeEvent called.")
 
@@ -1045,6 +1214,10 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
                 self, str(self.last_workspace_path)
             )
         self.video_processor.join_and_clear_threads()
+        try:
+            self.ui_task_runner.shutdown()
+        except Exception:
+            pass
         self.extension_manager.trigger_hook("on_app_close")
         # Optionally handle the event if needed
         event.accept()
@@ -1065,13 +1238,9 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
         list_view_actions.set_target_folder_auto_watch(self, enabled)
 
     def load_last_workspace(self) -> None:
-        """
-        Loads the last used workspace if available.
-        If no workspace is found (first launch or deleted config), prompts the user
-        to select an Execution Provider to prevent unwanted TensorRT engine generation.
-        """
-        # Show the load workspace dialog if the file exists
         last_workspace_path = self.last_workspace_path
+        workspace_load_triggered = False
+
         if last_workspace_path.is_file():
             auto_load_workspace_toggle = (
                 save_load_actions.get_auto_load_workspace_toggle(
@@ -1080,59 +1249,71 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
             )
             if auto_load_workspace_toggle:
                 save_load_actions.load_saved_workspace(self, str(last_workspace_path))
+                workspace_load_triggered = True
             else:
                 load_dialog = widget_components.LoadLastWorkspaceDialog(self)
-                load_dialog.exec_()
+                result = load_dialog.exec_()
+                workspace_load_triggered = (
+                    result == QtWidgets.QDialog.DialogCode.Accepted
+                )
         else:
-            # First launch or no workspace: Prompt for execution provider
             options = platform_support.available_execution_providers()
             default_index = options.index(platform_support.default_execution_provider())
-
             prompt = (
                 "No previous workspace found.\n\n"
                 "Please select your preferred execution provider."
             )
-            # The TensorRT warning only makes sense where TensorRT is an option.
             if any(o.startswith("TensorRT") for o in options):
                 prompt += (
                     "\n(Select 'CUDA' or 'CPU' to avoid generating TensorRT "
                     "engines on this launch):"
                 )
-
             provider, ok = QtWidgets.QInputDialog.getItem(
                 self,
                 "Initial Setup: Execution Provider",
                 prompt,
                 options,
                 default_index,
-                False,  # Non-editable dropdown
+                False,
             )
-
             if ok and provider:
                 print(f"[INFO] Initial provider selected: {provider}")
-                # 1. Update the control state
                 self.control["ProvidersPrioritySelection"] = provider
-
-                # 2. Update the corresponding UI widget if it has been instantiated
                 provider_widget = self.parameter_widgets.get(
                     "ProvidersPrioritySelection"
                 )
                 if provider_widget and hasattr(provider_widget, "setCurrentText"):
                     provider_widget.setCurrentText(provider)
-
-                # 3. Execute the function to apply the provider changes system-wide
                 try:
                     control_actions.change_execution_provider(self)
                 except Exception as e:
                     print(
-                        f"[ERROR] Failed to apply execution provider during startup: {e}"
+                        f"[ERROR] Failed to apply execution provider during "
+                        f"startup: {e}"
                     )
 
-        # Re-populate and set current selection for dynamic widgets like DenoiserUNetModelSelection
         self._populate_denoiser_unet_models()
         self._populate_reference_kv_tensors()
-        # Resume target-folder auto-watch if it was left enabled
-        self._restore_target_folder_auto_watch()
+
+        # Defer auto-watch until the workspace load chain has finished.
+        # Restoring it now would start a second TargetMediaLoaderWorker that
+        # races loader #1 and duplicates every target-media button.
+        def _restore_auto_watch_after_load():
+            self._restore_target_folder_auto_watch()
+
+        if workspace_load_triggered:
+            # Queue the auto-watch restore after the async chain signals done.
+            # The chain closes _workspace_load_done on the last step.
+            def _wait_and_restore():
+                if getattr(self, "_workspace_load_done", True):
+                    _restore_auto_watch_after_load()
+                else:
+                    QtCore.QTimer.singleShot(100, _wait_and_restore)
+
+            QtCore.QTimer.singleShot(100, _wait_and_restore)
+        else:
+            _restore_auto_watch_after_load()
+            self._on_workspace_load_finished()
 
     def register_parameter_section(
         self,
@@ -1231,7 +1412,6 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
         style(marker_buttons, lambda _b: max(30, marker_icon_size.width() + 16), marker_icon_size)
         style(icon_utility_buttons, lambda _b: max(30, utility_icon_size.width() + 16), utility_icon_size)
         self.liveSoundButton.setIconSize(QtCore.QSize(24, 24))
-        self.theatreModeButton.setIconSize(QtCore.QSize(28, 28))
         style(
             [b for b in text_utility_buttons if b is not None],
             lambda b: QtGui.QFontMetrics(b.font()).horizontalAdvance(b.text()) + 28,
@@ -2176,5 +2356,6 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
 
     def open_embedding_editor(self):
         if self.embedding_editor_window is None:
+            from app.ui.widgets.advanced_embedding_editor import EmbeddingGUI
             self.embedding_editor_window = EmbeddingGUI()
         self.embedding_editor_window.show()

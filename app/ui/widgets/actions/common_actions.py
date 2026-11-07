@@ -730,9 +730,12 @@ def extract_frame_as_image(
         import time as _time
 
         for _attempt in range(3):
-            cap = cv2.VideoCapture(media_file_path)
+            # Try FFmpeg first — required for correct HEVC frame counting.
+            cap = cv2.VideoCapture(media_file_path, cv2.CAP_FFMPEG)
+            if not cap.isOpened():
+                cap.release()
+                cap = cv2.VideoCapture(media_file_path)
             if cap.isOpened():
-                # Explicitly enable OpenCV's auto-rotation
                 if hasattr(cv2, "CAP_PROP_ORIENTATION_AUTO"):
                     cap.set(cv2.CAP_PROP_ORIENTATION_AUTO, 1)
                 width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
@@ -740,6 +743,14 @@ def extract_frame_as_image(
                 total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
                 frame_rate = float(cap.get(cv2.CAP_PROP_FPS))
                 bitrate_kbits = float(cap.get(cv2.CAP_PROP_BITRATE))
+
+                if total_frames <= 0:
+                    cap.set(cv2.CAP_PROP_POS_AVI_RATIO, 1.0)
+                    end_frame = int(cap.get(cv2.CAP_PROP_POS_FRAMES))
+                    cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                    if end_frame > 0:
+                        total_frames = end_frame
+
                 if rotation_angle in (90, 270):
                     width, height = height, width
                 metadata = misc_helpers.MediaMetadata(
@@ -755,15 +766,15 @@ def extract_frame_as_image(
                     ret, frame = misc_helpers.read_frame(cap, rotation_angle)
                     cap.release()
                     if ret:
-                        break  # success — exit retry loop
-                    cap = None  # mark for next attempt
+                        break
+                    cap = None
                 else:
                     cap.release()
                     cap = None
             else:
                 cap = None
             if _attempt < 2:
-                _time.sleep(0.5)  # wait before retry (file may still be flushed)
+                _time.sleep(0.5)
     elif file_type == "webcam":
         camera = cv2.VideoCapture(webcam_index, webcam_backend)
         if camera.isOpened():
@@ -924,39 +935,25 @@ def update_placeholder_visibility(
     # print("SetVisible", is_visible)
     # print("targetVideosList.count()", list_widget.count())
 
-
 @QtCore.Slot()
 def show_model_loading_dialog(main_window: "MainWindow"):
-    # Debounce: Only show dialog if loading takes longer than 300ms
-    if not hasattr(main_window, "_model_loading_timer"):
-        main_window._model_loading_timer = QtCore.QTimer()
-        main_window._model_loading_timer.setSingleShot(True)
+    if hasattr(main_window, "_watermark_hide_timer"):
+        main_window._watermark_hide_timer.stop()
 
-        def show_dialog():
-            if (
-                not hasattr(main_window, "model_loading_dialog")
-                or main_window.model_loading_dialog is None
-            ):
-                main_window.model_loading_dialog = widget_components.LoadingDialog()
-            if not main_window.model_loading_dialog.isVisible():
-                main_window.model_loading_dialog.show()
-                QtWidgets.QApplication.processEvents()
+    main_window._active_model_loads = getattr(main_window, "_active_model_loads", 0) + 1
 
-        main_window._model_loading_timer.timeout.connect(show_dialog)
-    # Start or restart the timer
-    main_window._model_loading_timer.start(300)
-
+    if main_window._active_model_loads == 1 and hasattr(main_window, "_show_preview_watermark"):
+        main_window._show_preview_watermark()
 
 @QtCore.Slot()
 def hide_model_loading_dialog(main_window: "MainWindow"):
-    # Stop the timer if it's running
-    if hasattr(main_window, "_model_loading_timer"):
-        main_window._model_loading_timer.stop()
-    # Only hide if dialog exists and is visible
-    if (
-        hasattr(main_window, "model_loading_dialog")
-        and main_window.model_loading_dialog is not None
-    ):
-        if main_window.model_loading_dialog.isVisible():
-            main_window.model_loading_dialog.hide()
-            QtWidgets.QApplication.processEvents()
+    main_window._active_model_loads = max(0, getattr(main_window, "_active_model_loads", 1) - 1)
+    
+    if main_window._active_model_loads == 0 and hasattr(main_window, "_hide_preview_watermark"):
+        if not hasattr(main_window, "_watermark_hide_timer"):
+            main_window._watermark_hide_timer = QtCore.QTimer()
+            main_window._watermark_hide_timer.setSingleShot(True)
+            main_window._watermark_hide_timer.timeout.connect(main_window._hide_preview_watermark)
+        
+        # 2500ms delay: if another model starts loading in this window, the timer is stopped
+        main_window._watermark_hide_timer.start(2500)

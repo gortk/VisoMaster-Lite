@@ -85,6 +85,9 @@ def _flush_target_media_thumbnail_batch(main_window: "MainWindow") -> None:
         list_widget.viewport().update()
         _advance_target_media_progress(main_window, batch_size)
 
+    if list_widget.count() > 0:
+        main_window.placeholder_update_signal.emit(list_widget, False)
+
     if pending_items:
         _ensure_target_media_batch_timer(main_window).start(
             _TARGET_MEDIA_BATCH_INTERVAL_MS
@@ -201,6 +204,9 @@ def _flush_input_face_thumbnail_batch(main_window: "MainWindow") -> None:
         # Re-enable and force a single paint event
         list_widget.setUpdatesEnabled(True)
         list_widget.viewport().update()
+
+    if list_widget.count() > 0:
+        main_window.placeholder_update_signal.emit(list_widget, False)
 
     # If items remain in the queue, restart the timer for the next batch
     if pending_items:
@@ -628,7 +634,6 @@ def select_target_medias(
         files_list = QtWidgets.QFileDialog.getOpenFileNames()[0]
         if not files_list:
             return
-    # Get Folder name from the first file
         file_dir = misc_helpers.get_dir_of_file(files_list[0])
         main_window.targetVideosPathLineEdit.setText(file_dir)
         main_window.targetVideosPathLineEdit.setToolTip(file_dir)
@@ -648,14 +653,14 @@ def select_target_medias(
         main_window=main_window, folder_name=folder_name, files_list=files_list
     )
     main_window.video_loader_worker.thumbnail_ready.connect(
-        partial(add_media_thumbnail_to_target_videos_list, main_window)
+        partial(add_media_thumbnail_to_target_videos_list, main_window),
+        QtCore.Qt.ConnectionType.QueuedConnection,
     )
     main_window.video_loader_worker.finished.connect(
         partial(filter_target_videos, main_window)
     )
     main_window.video_loader_worker.start()
 
-    # Re-bind auto-watch to the newly selected folder
     set_target_folder_auto_watch(
         main_window,
         bool(main_window.control.get("AutoLoadTargetFolderToggle", False)),
@@ -1031,7 +1036,8 @@ def select_input_face_images(
         main_window=main_window, folder_name=folder_name, files_list=files_list
     )
     main_window.input_faces_loader_worker.thumbnail_ready.connect(
-        partial(add_media_thumbnail_to_source_faces_list, main_window)
+        partial(add_media_thumbnail_to_source_faces_list, main_window),
+        QtCore.Qt.ConnectionType.QueuedConnection,
     )
 
     main_window.input_faces_loader_worker.start()
@@ -1540,6 +1546,12 @@ def scan_and_append_new_target_media(main_window: "MainWindow"):
     if video_control_actions.block_if_issue_scan_active(
         main_window, "auto-load target media"
     ):
+        return
+
+    if not getattr(main_window, "_workspace_load_done", True):
+        timer = getattr(main_window, "_target_folder_watch_timer", None)
+        if timer is not None:
+            timer.start()
         return
 
     folder = _get_target_folder_path(main_window)

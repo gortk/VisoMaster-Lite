@@ -738,318 +738,327 @@ class ModelsProcessor(QtCore.QObject):
 
             return compound_sessions if all_successful else None
 
-        with self.model_lock:
-            if self.models.get(canonical_name):
-                return self.models[canonical_name]
-
-            models_loading = getattr(self, "_models_loading", None)
-            if models_loading is None:
-                models_loading = set()
-                self._models_loading = models_loading
-            if canonical_name in models_loading:
-                print(
-                    f"[INFO] Load already in progress for '{canonical_name}'; skipping re-entrant load request."
-                )
-                return self.models.get(canonical_name)
-            models_loading.add(canonical_name)
-
-            model_instance = None
-            onnx_path = self.models_path.get(canonical_name)
-            if not onnx_path:
-                models_loading.discard(canonical_name)
-                print(
-                    f"[ERROR] Model path for '{canonical_name}' not found in models_data."
-                )
-                return None
-
-            # Some models need a shape-inferred graph before the TensorRT EP can
-            # build an engine. This transparently swaps in a cached sidecar; the
-            # original path stays untouched for download/integrity checks.
-            onnx_path = self._ensure_trt_ready_onnx(canonical_name, onnx_path)
-
-            build_was_triggered = (
-                False  # MP-05: flag to track if build dialog was shown
-            )
-
-            # --- DYNAMIC PRECISION CONFIGURATION (WHITELIST FP16) ---
-            model_trt_options = dict(self.trt_ep_options)
-
-            # --- DETECT TRT CACHE STATE ---
-            cache_state = self._check_tensorrt_cache_state(canonical_name, onnx_path)
-
-            if cache_state == "LEGACY":
-                print(
-                    f"[INFO] Legacy TRT cache detected for {canonical_name}. Bypassing explicit prefix."
-                )
-                # Remove prefix so ONNX Runtime loads generic TensorrtExecutionProvider_ files
-                model_trt_options.pop("trt_engine_cache_prefix", None)
-            else:
-                # For EXPLICIT caches or brand new builds (None), strictly set custom prefix
-                model_trt_options["trt_engine_cache_prefix"] = canonical_name
-
-            # Check if the model is explicitly marked as safe for FP16 in models_data.py
-            if canonical_name in fp16_safe_models_list:
-                model_trt_options["trt_fp16_enable"] = True
-                print(f"[INFO] FP16 Acceleration ENABLED for {canonical_name}")
-            else:
-                model_trt_options["trt_fp16_enable"] = False
-
-            # Reconstruct the providers with model-specific options
-            model_providers = []
-            for p in self.providers:
-                if isinstance(p, tuple) and p[0] == "TensorrtExecutionProvider":
-                    model_providers.append(
-                        ("TensorrtExecutionProvider", model_trt_options)
-                    )
-                elif p == "TensorrtExecutionProvider":
-                    model_providers.append(
-                        ("TensorrtExecutionProvider", model_trt_options)
-                    )
-                else:
-                    model_providers.append(p)
-
-            is_tensorrt_load = any(
-                (p[0] if isinstance(p, tuple) else p) == "TensorrtExecutionProvider"
-                for p in model_providers
-            )
-
-            if onnx_path.lower().endswith(".onnx"):
-                # Only run the isolated probe if TensorRT is the target provider
-                if is_tensorrt_load:
-                    cache_is_valid = cache_state is not None
-
-                    # If no engine config file or cache file exists run the probe
-                    if not cache_is_valid:
-                        print(
-                            f"[INFO] TensorRT load detected for {canonical_name}. Running isolated probe..."
-                        )
-
-                        try:
-                            # The trt engine build worker process use this SessionOptions
-                            # to use only 1 thread for building engines
-                            sess_options_dict = {"intra_op_num_threads": 1}
-
-                            self._trt_build_session_count += 1
-                            expected_seconds = (
-                                self._build_time_store.expected_seconds(canonical_name)
-                                or -1.0
-                            )
-
-                            # Ask the GUI thread to show the progress dialog.
-                            self.build_dialog_show.emit(
-                                "Building TensorRT Cache",
-                                "Building TensorRT engine cache for:\n"
-                                f"{os.path.basename(onnx_path)}",
-                                float(expected_seconds),
-                                self._trt_build_session_count,
-                            )
-                            build_was_triggered = True
-
-                            probe_successful = False
-                            last_exit_code = None
-                            max_retries = 3
-
-                            for attempt in range(max_retries):
-                                print(
-                                    f"[INFO] Probe attempt {attempt + 1} of {max_retries} for {canonical_name}..."
-                                )
-                                if attempt > 0:
-                                    self.build_dialog_stage.emit(
-                                        f"Retrying the build (attempt {attempt + 1} of {max_retries})..."
-                                    )
-
-                                build_started = time.monotonic()
-                                # Pass the full providers list (with tuples) so the
-                                # probe can reconstruct them with device_id options.
-                                # Timeout of 15 minutes recovers from compiler lockups;
-                                # the dialog's Cancel button aborts via RuntimeError.
-                                exitcode = self._run_build_probe(
-                                    onnx_path,
-                                    list(model_providers),
-                                    model_trt_options,
-                                    sess_options_dict,
-                                    canonical_name,
-                                    timeout_seconds=900,
-                                )
-                                last_exit_code = exitcode
-
-                                if exitcode == 0:
-                                    # Remember how long the build took so the
-                                    # dialog can estimate remaining time on
-                                    # the next rebuild of this model.
-                                    self._build_time_store.record(
-                                        canonical_name, time.monotonic() - build_started
-                                    )
-                                    print(
-                                        f"[INFO] Probe successful for {canonical_name}. Cache should be built."
-                                    )
-                                    probe_successful = True
-                                    break  # Exit the retry loop on success
-                                else:
-                                    print(
-                                        f"[WARN] Probe attempt {attempt + 1} failed with exit code {exitcode}."
-                                    )
-
-                                    # Wipe corrupted artifacts before attempting the next retry
-                                    print(
-                                        f"[INFO] Cleaning up potentially corrupted TensorRT cache for {canonical_name}..."
-                                    )
-                                    self._clean_tensorrt_cache(
-                                        onnx_path, model_trt_options
-                                    )
-
-                                    if attempt < max_retries - 1:
-                                        print("[INFO] Retrying in 2 seconds...")
-                                        time.sleep(2.0)
-
-                            if not probe_successful:
-                                raise RuntimeError(
-                                    f"[ERROR] ONNX/TensorRT probe process failed after {max_retries} attempts. Last exit code: {last_exit_code}"
-                                )
-
-                        except Exception:
-                            # MP-05: only emit hide_build_dialog when build was triggered
-                            if build_was_triggered:
-                                self.build_dialog_hide.emit()
-
-                            print(
-                                f"[ERROR] Isolated probe failed for {canonical_name}."
-                            )
-                            print(
-                                "[ERROR] The model will not be loaded. This is likely a fatal TensorRT/CUDA error."
-                            )
-                            traceback.print_exc()
-                            self.models[canonical_name] = (
-                                None  # Ensure it's marked as not loaded
-                            )
-                            models_loading.discard(canonical_name)
-                            return None  # Abort the load
-
-            # Now, proceed with the *actual* load in the calling thread.
-            try:
-                # MP-01: Double-checked load after re-acquiring the lock.
-                # Another thread may have loaded this model while we were in the probe.
+        is_loading_started = False
+        try:
+            with self.model_lock:
                 if self.models.get(canonical_name):
+                    return self.models[canonical_name]
+
+                models_loading = getattr(self, "_models_loading", None)
+                if models_loading is None:
+                    models_loading = set()
+                    self._models_loading = models_loading
+                if canonical_name in models_loading:
                     print(
-                        f"[INFO] Skipped loading: {canonical_name} is already loaded in memory (post-probe check)."
+                        f"[INFO] Load already in progress for '{canonical_name}'; skipping re-entrant load request."
                     )
                     return self.models.get(canonical_name)
+                models_loading.add(canonical_name)
+                
+                is_loading_started = True
+                if getattr(self, "main_window", None):
+                    self.main_window.model_loading_signal.emit()
 
-                if session_options is None:
-                    session_options = onnxruntime.SessionOptions()
-
-                # Force log_severity_level to 3 (ERROR) for the actual load as well, to suppress non-critical warnings from ONNX Runtime that can clutter the console.
-                session_options.log_severity_level = 3
-
-                if build_was_triggered:
-                    if self._build_cancel_event.is_set():
-                        self._clean_tensorrt_cache(onnx_path, model_trt_options)
-                        raise RuntimeError("TensorRT engine build cancelled by user.")
-                    self.build_dialog_stage.emit(
-                        "Loading the built engine into the app..."
+                model_instance = None
+                onnx_path = self.models_path.get(canonical_name)
+                if not onnx_path:
+                    models_loading.discard(canonical_name)
+                    print(
+                        f"[ERROR] Model path for '{canonical_name}' not found in models_data."
                     )
+                    return None
 
-                # Deserializing a freshly built engine cache can take a while
-                # for large models. When a modal build dialog is active on the
-                # GUI thread, do the load in a worker and pump the event loop
-                # meanwhile, so Windows never marks the window "Not Responding".
-                app = QtCore.QCoreApplication.instance()
-                on_gui_thread = (
-                    app is not None
-                    and QtCore.QThread.currentThread() == app.thread()
+                # Some models need a shape-inferred graph before the TensorRT EP can
+                # build an engine. This transparently swaps in a cached sidecar; the
+                # original path stays untouched for download/integrity checks.
+                onnx_path = self._ensure_trt_ready_onnx(canonical_name, onnx_path)
+
+                build_was_triggered = (
+                    False  # MP-05: flag to track if build dialog was shown
                 )
-                if build_was_triggered and on_gui_thread:
-                    load_outcome: Dict[str, Any] = {}
 
-                    def _load_session_worker() -> None:
-                        try:
-                            load_outcome["instance"] = onnxruntime.InferenceSession(
-                                onnx_path,
-                                sess_options=session_options,
-                                providers=model_providers,
-                            )
-                        except BaseException as load_err:
-                            load_outcome["error"] = load_err
+                # --- DYNAMIC PRECISION CONFIGURATION (WHITELIST FP16) ---
+                model_trt_options = dict(self.trt_ep_options)
 
-                    load_thread = threading.Thread(
-                        target=_load_session_worker, daemon=True
+                # --- DETECT TRT CACHE STATE ---
+                cache_state = self._check_tensorrt_cache_state(canonical_name, onnx_path)
+
+                if cache_state == "LEGACY":
+                    print(
+                        f"[INFO] Legacy TRT cache detected for {canonical_name}. Bypassing explicit prefix."
                     )
-                    load_thread.start()
-                    while load_thread.is_alive():
-                        QtCore.QCoreApplication.processEvents()
-                        time.sleep(0.05)
-                    load_thread.join()
-                    if "error" in load_outcome:
-                        raise load_outcome["error"]
-                    model_instance = load_outcome.get("instance")
+                    # Remove prefix so ONNX Runtime loads generic TensorrtExecutionProvider_ files
+                    model_trt_options.pop("trt_engine_cache_prefix", None)
                 else:
-                    model_instance = onnxruntime.InferenceSession(
-                        onnx_path,
-                        sess_options=session_options,
-                        providers=model_providers,
-                    )
+                    # For EXPLICIT caches or brand new builds (None), strictly set custom prefix
+                    model_trt_options["trt_engine_cache_prefix"] = canonical_name
 
-                # This ensures the CUDA context is synchronized after a new TRT
-                # engine build, before we try to load it.
-                if build_was_triggered:
-                    if torch.cuda.is_available():
-                        # Only synchronise current stream
-                        torch.cuda.current_stream().synchronize()
+                # Check if the model is explicitly marked as safe for FP16 in models_data.py
+                if canonical_name in fp16_safe_models_list:
+                    model_trt_options["trt_fp16_enable"] = True
+                    print(f"[INFO] FP16 Acceleration ENABLED for {canonical_name}")
+                else:
+                    model_trt_options["trt_fp16_enable"] = False
 
-                    # Check cache AGAIN.
-                    # If the probe succeeded BUT the cache STILL doesn't exist,
-                    # it's a "Lazy Build" model.
-                    if (
-                        self._check_tensorrt_cache_state(canonical_name, onnx_path)
-                        is None
-                    ):
-                        print(
-                            f"[INFO] Model {canonical_name} requires a lazy build (engine not found after probe)."
+                # Reconstruct the providers with model-specific options
+                model_providers = []
+                for p in self.providers:
+                    if isinstance(p, tuple) and p[0] == "TensorrtExecutionProvider":
+                        model_providers.append(
+                            ("TensorrtExecutionProvider", model_trt_options)
                         )
-                        self.models_pending_build.add(canonical_name)
-
-                self.models[canonical_name] = model_instance
-                print(
-                    f"[INFO] Loading model: {canonical_name} with provider: {self.provider_name}"
-                )
-                if canonical_name == "Inswapper128":
-                    graph = onnx.load(self.models_path[canonical_name]).graph
-                    emap_initializer = None
-                    for initializer in graph.initializer:
-                        if initializer.name == "emap":
-                            emap_initializer = initializer
-                            break
-
-                    if emap_initializer:
-                        self.emap = onnx.numpy_helper.to_array(emap_initializer)
+                    elif p == "TensorrtExecutionProvider":
+                        model_providers.append(
+                            ("TensorrtExecutionProvider", model_trt_options)
+                        )
                     else:
-                        self.emap = onnx.numpy_helper.to_array(graph.initializer[-1])
-                    # MP-17: release large ONNX graph object after emap extraction
-                    del graph
-                    gc.collect()
+                        model_providers.append(p)
 
-                # If an atomic restorer was loaded, purge any previously loaded restorers that are no longer active
-                if canonical_name in restorer_model_mapping.values():
-                    self.purge_unused_restorers()
-
-                return model_instance
-
-            except Exception:
-                print(
-                    f"[ERROR] Failed to load model {canonical_name} (even after probe)."
+                is_tensorrt_load = any(
+                    (p[0] if isinstance(p, tuple) else p) == "TensorrtExecutionProvider"
+                    for p in model_providers
                 )
-                traceback.print_exc()
-                if model_instance is not None:
-                    del model_instance
-                    gc.collect()
-                self.models[canonical_name] = None
-                return None
 
-            finally:
-                models_loading.discard(canonical_name)
-                # MP-05: Only emit hide_build_dialog when a build was triggered.
-                if build_was_triggered:
-                    self.build_dialog_hide.emit()
+                if onnx_path.lower().endswith(".onnx"):
+                    # Only run the isolated probe if TensorRT is the target provider
+                    if is_tensorrt_load:
+                        cache_is_valid = cache_state is not None
+
+                        # If no engine config file or cache file exists run the probe
+                        if not cache_is_valid:
+                            print(
+                                f"[INFO] TensorRT load detected for {canonical_name}. Running isolated probe..."
+                            )
+
+                            try:
+                                # The trt engine build worker process use this SessionOptions
+                                # to use only 1 thread for building engines
+                                sess_options_dict = {"intra_op_num_threads": 1}
+
+                                self._trt_build_session_count += 1
+                                expected_seconds = (
+                                    self._build_time_store.expected_seconds(canonical_name)
+                                    or -1.0
+                                )
+
+                                # Ask the GUI thread to show the progress dialog.
+                                self.build_dialog_show.emit(
+                                    "Building TensorRT Cache",
+                                    "Building TensorRT engine cache for:\n"
+                                    f"{os.path.basename(onnx_path)}",
+                                    float(expected_seconds),
+                                    self._trt_build_session_count,
+                                )
+                                build_was_triggered = True
+
+                                probe_successful = False
+                                last_exit_code = None
+                                max_retries = 3
+
+                                for attempt in range(max_retries):
+                                    print(
+                                        f"[INFO] Probe attempt {attempt + 1} of {max_retries} for {canonical_name}..."
+                                    )
+                                    if attempt > 0:
+                                        self.build_dialog_stage.emit(
+                                            f"Retrying the build (attempt {attempt + 1} of {max_retries})..."
+                                        )
+
+                                    build_started = time.monotonic()
+                                    # Pass the full providers list (with tuples) so the
+                                    # probe can reconstruct them with device_id options.
+                                    # Timeout of 15 minutes recovers from compiler lockups;
+                                    # the dialog's Cancel button aborts via RuntimeError.
+                                    exitcode = self._run_build_probe(
+                                        onnx_path,
+                                        list(model_providers),
+                                        model_trt_options,
+                                        sess_options_dict,
+                                        canonical_name,
+                                        timeout_seconds=900,
+                                    )
+                                    last_exit_code = exitcode
+
+                                    if exitcode == 0:
+                                        # Remember how long the build took so the
+                                        # dialog can estimate remaining time on
+                                        # the next rebuild of this model.
+                                        self._build_time_store.record(
+                                            canonical_name, time.monotonic() - build_started
+                                        )
+                                        print(
+                                            f"[INFO] Probe successful for {canonical_name}. Cache should be built."
+                                        )
+                                        probe_successful = True
+                                        break  # Exit the retry loop on success
+                                    else:
+                                        print(
+                                            f"[WARN] Probe attempt {attempt + 1} failed with exit code {exitcode}."
+                                        )
+
+                                        # Wipe corrupted artifacts before attempting the next retry
+                                        print(
+                                            f"[INFO] Cleaning up potentially corrupted TensorRT cache for {canonical_name}..."
+                                        )
+                                        self._clean_tensorrt_cache(
+                                            onnx_path, model_trt_options
+                                        )
+
+                                        if attempt < max_retries - 1:
+                                            print("[INFO] Retrying in 2 seconds...")
+                                            time.sleep(2.0)
+
+                                if not probe_successful:
+                                    raise RuntimeError(
+                                        f"[ERROR] ONNX/TensorRT probe process failed after {max_retries} attempts. Last exit code: {last_exit_code}"
+                                    )
+
+                            except Exception:
+                                # MP-05: only emit hide_build_dialog when build was triggered
+                                if build_was_triggered:
+                                    self.build_dialog_hide.emit()
+
+                                print(
+                                    f"[ERROR] Isolated probe failed for {canonical_name}."
+                                )
+                                print(
+                                    "[ERROR] The model will not be loaded. This is likely a fatal TensorRT/CUDA error."
+                                )
+                                traceback.print_exc()
+                                self.models[canonical_name] = (
+                                    None  # Ensure it's marked as not loaded
+                                )
+                                models_loading.discard(canonical_name)
+                                return None  # Abort the load
+
+                # Now, proceed with the *actual* load in the calling thread.
+                try:
+                    # MP-01: Double-checked load after re-acquiring the lock.
+                    # Another thread may have loaded this model while we were in the probe.
+                    if self.models.get(canonical_name):
+                        print(
+                            f"[INFO] Skipped loading: {canonical_name} is already loaded in memory (post-probe check)."
+                        )
+                        return self.models.get(canonical_name)
+
+                    if session_options is None:
+                        session_options = onnxruntime.SessionOptions()
+
+                    # Force log_severity_level to 3 (ERROR) for the actual load as well, to suppress non-critical warnings from ONNX Runtime that can clutter the console.
+                    session_options.log_severity_level = 3
+
+                    if build_was_triggered:
+                        if self._build_cancel_event.is_set():
+                            self._clean_tensorrt_cache(onnx_path, model_trt_options)
+                            raise RuntimeError("TensorRT engine build cancelled by user.")
+                        self.build_dialog_stage.emit(
+                            "Loading the built engine into the app..."
+                        )
+
+                    # Deserializing a freshly built engine cache can take a while
+                    # for large models. When a modal build dialog is active on the
+                    # GUI thread, do the load in a worker and pump the event loop
+                    # meanwhile, so Windows never marks the window "Not Responding".
+                    app = QtCore.QCoreApplication.instance()
+                    on_gui_thread = (
+                        app is not None
+                        and QtCore.QThread.currentThread() == app.thread()
+                    )
+                    if build_was_triggered and on_gui_thread:
+                        load_outcome: Dict[str, Any] = {}
+
+                        def _load_session_worker() -> None:
+                            try:
+                                load_outcome["instance"] = onnxruntime.InferenceSession(
+                                    onnx_path,
+                                    sess_options=session_options,
+                                    providers=model_providers,
+                                )
+                            except BaseException as load_err:
+                                load_outcome["error"] = load_err
+
+                        load_thread = threading.Thread(
+                            target=_load_session_worker, daemon=True
+                        )
+                        load_thread.start()
+                        while load_thread.is_alive():
+                            QtCore.QCoreApplication.processEvents()
+                            time.sleep(0.05)
+                        load_thread.join()
+                        if "error" in load_outcome:
+                            raise load_outcome["error"]
+                        model_instance = load_outcome.get("instance")
+                    else:
+                        model_instance = onnxruntime.InferenceSession(
+                            onnx_path,
+                            sess_options=session_options,
+                            providers=model_providers,
+                        )
+
+                    # This ensures the CUDA context is synchronized after a new TRT
+                    # engine build, before we try to load it.
+                    if build_was_triggered:
+                        if torch.cuda.is_available():
+                            # Only synchronise current stream
+                            torch.cuda.current_stream().synchronize()
+
+                        # Check cache AGAIN.
+                        # If the probe succeeded BUT the cache STILL doesn't exist,
+                        # it's a "Lazy Build" model.
+                        if (
+                            self._check_tensorrt_cache_state(canonical_name, onnx_path)
+                            is None
+                        ):
+                            print(
+                                f"[INFO] Model {canonical_name} requires a lazy build (engine not found after probe)."
+                            )
+                            self.models_pending_build.add(canonical_name)
+
+                    self.models[canonical_name] = model_instance
+                    print(
+                        f"[INFO] Loading model: {canonical_name} with provider: {self.provider_name}"
+                    )
+                    if canonical_name == "Inswapper128":
+                        graph = onnx.load(self.models_path[canonical_name]).graph
+                        emap_initializer = None
+                        for initializer in graph.initializer:
+                            if initializer.name == "emap":
+                                emap_initializer = initializer
+                                break
+
+                        if emap_initializer:
+                            self.emap = onnx.numpy_helper.to_array(emap_initializer)
+                        else:
+                            self.emap = onnx.numpy_helper.to_array(graph.initializer[-1])
+                        # MP-17: release large ONNX graph object after emap extraction
+                        del graph
+                        gc.collect()
+
+                    # If an atomic restorer was loaded, purge any previously loaded restorers that are no longer active
+                    if canonical_name in restorer_model_mapping.values():
+                        self.purge_unused_restorers()
+
+                    return model_instance
+
+                except Exception:
+                    print(
+                        f"[ERROR] Failed to load model {canonical_name} (even after probe)."
+                    )
+                    traceback.print_exc()
+                    if model_instance is not None:
+                        del model_instance
+                        gc.collect()
+                    self.models[canonical_name] = None
+                    return None
+
+                finally:
+                    models_loading.discard(canonical_name)
+                    # MP-05: Only emit hide_build_dialog when a build was triggered.
+                    if build_was_triggered:
+                        self.build_dialog_hide.emit()
+        finally:
+            if is_loading_started and getattr(self, "main_window", None):
+                self.main_window.model_loaded_signal.emit()
 
     def check_and_clear_pending_build(self, model_name: str) -> bool:
         """

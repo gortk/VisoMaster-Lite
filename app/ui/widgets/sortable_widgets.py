@@ -3,7 +3,6 @@ from __future__ import annotations
 import enum
 import re
 from dataclasses import dataclass
-from functools import total_ordering
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional
 
@@ -34,9 +33,6 @@ class SortingMode(enum.IntEnum):
     ImagePixels = 0x145
     VideoLength = 0x146
 
-    def to_id(self) -> str:
-        return self.name
-
 
 initialize_combobox_items = [
     ("Sort by Name", SortingMode.FileName),
@@ -50,10 +46,11 @@ initialize_combobox_items = [
 _FILE_MODES = frozenset(
     {SortingMode.FileBirthDate, SortingMode.FileName, SortingMode.FileSize}
 )
+_MISSING = object()
 
 
-@total_ordering
-@dataclass(frozen=True)
+
+@dataclass(frozen=True, slots=True, order=True)
 class SortableImageDimension:
     width: int
     height: int
@@ -79,19 +76,6 @@ class SortableImageDimension:
 
     def __str__(self) -> str:
         return f"{self.width}x{self.height}"
-
-    def __eq__(self, other: object) -> bool:
-        if not isinstance(other, SortableImageDimension):
-            return NotImplemented
-        return self.sort_key == other.sort_key
-
-    def __hash__(self) -> int:
-        return hash(self.sort_key)
-
-    def __lt__(self, other: object) -> bool:
-        if not isinstance(other, SortableImageDimension):
-            return NotImplemented
-        return self.sort_key < other.sort_key
 
     # PARSERS
 
@@ -138,6 +122,10 @@ class TargetVideosListWidget(SortableListWidget):
 
 
 class SortableListWidgetItem(QtWidgets.QListWidgetItem):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._key_cache: dict[SortingMode, object] = {}
+        self._tie_cache: str | None = None
     def fileType(self) -> str:
         stored = self.data(SortableDataRole.FileTypeRole)
         if stored:
@@ -145,7 +133,9 @@ class SortableListWidgetItem(QtWidgets.QListWidgetItem):
         fileinfo = self.fileInfo()
         if fileinfo is None:
             return ""
-        return get_file_type(fileinfo.filePath()) or ""
+        ft = get_file_type(fileinfo.filePath()) or ""
+        self.setFileType(ft)
+        return ft
 
     # DATA
 
@@ -160,35 +150,48 @@ class SortableListWidgetItem(QtWidgets.QListWidgetItem):
         return fileinfo if isinstance(fileinfo, QtCore.QFileInfo) else None
 
     def setFileInfo(self, info: QtCore.QFileInfo) -> None:
+        self._key_cache.clear()
+        self._tie_cache = None
         self.setData(SortableDataRole.FileInfoRole, info)
 
     def setFileType(self, file_type: str) -> None:
+        self._key_cache.clear()
         self.setData(SortableDataRole.FileTypeRole, file_type)
 
     def imageDimension(self) -> Optional[SortableImageDimension]:
         imgdim = self.data(SortableDataRole.ImageDimensionRole)
         return imgdim if isinstance(imgdim, SortableImageDimension) else None
 
-    def setImageDimension(self, imgdim: SortableImageDimension) -> None:
-        self.setData(SortableDataRole.ImageDimensionRole, imgdim)
-
     def mediaMetadata(self) -> Optional[MediaMetadata]:
         metadata = self.data(SortableDataRole.MediaMetadataRole)
         return metadata if isinstance(metadata, MediaMetadata) else None
 
+    def setImageDimension(self, imgdim: SortableImageDimension) -> None:
+        self._key_cache.clear()
+        self.setData(SortableDataRole.ImageDimensionRole, imgdim)
+
     def setMediaMetadata(self, metadata: MediaMetadata) -> None:
+        self._key_cache.clear()
         self.setData(SortableDataRole.MediaMetadataRole, metadata)
 
     # COMPARATORS
 
     def _sort_key(self, sort_mode: SortingMode):
-        """Value to order this item by, or None when it cannot be determined."""
+        cached = self._key_cache.get(sort_mode, _MISSING)
+        if cached is not _MISSING:
+            return cached
+        key = self._compute_sort_key(sort_mode)
+        self._key_cache[sort_mode] = key
+        return key
+
+    def _compute_sort_key(self, sort_mode: SortingMode):
         if sort_mode in _FILE_MODES:
             fileinfo = self.fileInfo()
             if fileinfo is None:
                 return None
             if sort_mode == SortingMode.FileBirthDate:
-                return fileinfo.birthTime()
+                dt = fileinfo.birthTime()
+                return dt.toMSecsSinceEpoch() if dt.isValid() else None
             if sort_mode == SortingMode.FileName:
                 return fileinfo.baseName().casefold()
             return fileinfo.size()
@@ -216,22 +219,19 @@ class SortableListWidgetItem(QtWidgets.QListWidgetItem):
         left = self._sort_key(list_widget.sortingMode())
         right = other._sort_key(list_widget.sortingMode())
 
-        # Items that lack the data being sorted on (webcams have no file on disk)
-        # sink below the ones that have it, rather than comparing equal to
-        # everything, which would scramble the whole order.
+        if left is None and right is None:
+            return self._tie_break_key() < other._tie_break_key()
         if left is None or right is None:
             return left is not None
-
         if left != right:
             return left < right
-
-        # Qt's sort is not stable, so tie-break on the file name to keep items
-        # with equal keys (same size, same dimensions, ...) in a predictable order.
         return self._tie_break_key() < other._tie_break_key()
 
     def _tie_break_key(self) -> str:
-        fileinfo = self.fileInfo()
-        return fileinfo.fileName().casefold() if fileinfo else ""
+        if self._tie_cache is None:
+            fileinfo = self.fileInfo()
+            self._tie_cache = fileinfo.fileName().casefold() if fileinfo else ""
+        return self._tie_cache
 
     # SERIALIZERS
 

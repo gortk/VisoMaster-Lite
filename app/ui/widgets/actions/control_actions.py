@@ -9,6 +9,7 @@ from torchvision.transforms import v2
 from PIL import Image
 
 from PySide6 import QtWidgets
+from PySide6 import QtCore
 import qdarktheme
 
 if TYPE_CHECKING:
@@ -38,70 +39,46 @@ def handle_face_detector_tracking_reset(main_window: "MainWindow", value: bool) 
 
 
 def clear_gpu_memory(main_window: "MainWindow"):
-    """
-    Centralized VRAM management. Stops processing, unloads all backend models,
-    resets UI toggles, and safely reconstructs Denoiser KV maps if required.
-    """
     main_window.video_processor.stop_processing()
-    main_window.function_worker.clear_gpu_memory()
     main_window.swapfacesButton.setChecked(False)
     main_window.editFacesButton.setChecked(False)
 
-    # The mouth action detector is a standalone singleton (not tracked in
-    # models_processor.models), so a full VRAM clear must release it explicitly.
-    # If AutoMouthExpressionEnableToggle is still on, it lazy-reloads on the
-    # next processed frame, same as the other lazy-loaded models above.
-    from app.processors.mouth_action_detector import MouthActionDetector
+    def _worker():
+        main_window.function_worker.clear_gpu_memory()
+        from app.processors.mouth_action_detector import MouthActionDetector
+        MouthActionDetector.unload()
 
-    MouthActionDetector.unload()
+        control = main_window.control
+        denoiser_on = (
+            control.get("DenoiserUNetEnableBeforeRestorersToggle", False)
+            or control.get("DenoiserAfterFirstRestorerToggle", False)
+            or control.get("DenoiserAfterRestorersToggle", False)
+        )
+        if denoiser_on and hasattr(main_window, "target_faces") and main_window.target_faces:
+            for target_face in list(main_window.target_faces.values()):
+                if hasattr(target_face, "calculate_assigned_input_embedding"):
+                    target_face.calculate_assigned_input_embedding()
+        return True
 
-    # --- FW-VRAM-RECOVERY: Automatically restore KV maps safely ---
-    # Centralized recovery: restores KV maps if Denoiser is active so the
-    # next frame swap doesn't fail due to missing PyTorch tensor references.
-    denoiser_on = (
-        main_window.control.get("DenoiserUNetEnableBeforeRestorersToggle", False)
-        or main_window.control.get("DenoiserAfterFirstRestorerToggle", False)
-        or main_window.control.get("DenoiserAfterRestorersToggle", False)
-    )
-
-    if (
-        denoiser_on
-        and hasattr(main_window, "target_faces")
-        and main_window.target_faces
-    ):
-        print("[INFO] Denoiser is active. Restoring KV maps after VRAM clear...")
-        for target_face in main_window.target_faces.values():
-            if hasattr(target_face, "calculate_assigned_input_embedding"):
-                target_face.calculate_assigned_input_embedding()
-
-        # Refresh context pointers for the active face so the UI tracks the newly allocated tensors
+    def _finish(_result):
         selected_id = getattr(main_window, "selected_target_face_id", None)
         if selected_id:
             active_face = main_window.target_faces.get(selected_id)
             if active_face and hasattr(active_face, "assigned_kv_map"):
                 main_window.current_kv_tensors_map = active_face.assigned_kv_map
+        common_widget_actions.update_gpu_memory_progressbar(main_window)
+        main_window.videoSeekSlider.update()
+        common_widget_actions.refresh_frame(main_window)
 
-    common_widget_actions.update_gpu_memory_progressbar(main_window)
+    def _err(exc):
+        print(f"[ERROR] clear_gpu_memory: {exc}")
+        import traceback
+        traceback.print_exc()
 
-    # main_window.videoSeekSlider.markers = set() # Comment this to keep markers visible after vram clear
-    main_window.videoSeekSlider.update()
-
-    # Push a fresh frame to ensure the UI updates and models are JIT-loaded securely
-    common_widget_actions.refresh_frame(main_window)
+    main_window.ui_task_runner.submit(_worker, on_done=_finish, on_err=_err)
 
 
-def change_execution_provider(
-    main_window: "MainWindow", new_provider: str | None = None
-) -> None:
-    """
-    Changes the global execution provider.
-    If new_provider is omitted (e.g., during startup initialization), it safely
-    falls back to reading the current state from the main_window's control dictionary.
-
-    A provider the current machine cannot supply is downgraded to the best local
-    one rather than raising. Workspaces are portable, so a file saved on an
-    NVIDIA box will ask a Mac for "TensorRT" or "CUDA"; that should not be fatal.
-    """
+def change_execution_provider(main_window: "MainWindow", new_provider: str | None = None) -> None:
     supported = platform_support.available_execution_providers()
     fallback = platform_support.default_execution_provider()
 
@@ -109,6 +86,18 @@ def change_execution_provider(
         new_provider = str(
             main_window.control.get("ProvidersPrioritySelection", fallback)
         )
+
+    # TensorRT and TensorRT-Engine resolve to the same provider internally
+    # (see ModelsProcessor.update_provider_configuration). Treat them as equal
+    # so a workspace saved with one does not trigger a full pipeline teardown
+    # when the app is running on the other.
+    def _normalize(name: str) -> str:
+        return "TensorRT" if name in ("TensorRT", "TensorRT-Engine") else name
+
+    if _normalize(new_provider) == _normalize(
+        main_window.models_processor.provider_name
+    ):
+        return
 
     if new_provider not in supported:
         print(
@@ -123,12 +112,41 @@ def change_execution_provider(
         if provider_widget and hasattr(provider_widget, "setCurrentText"):
             provider_widget.setCurrentText(new_provider)
 
-    main_window.video_processor.stop_processing()
-    main_window.function_worker.switch_providers_priority(new_provider)
+    provider_widget = main_window.parameter_widgets.get("ProvidersPrioritySelection")
+    if provider_widget is not None:
+        provider_widget.setEnabled(False)
 
-    # Route directly through the centralized UI memory cleaner
-    # to guarantee VRAM is wiped and all dependent KV maps are safely restored.
-    clear_gpu_memory(main_window)
+    # GUI thread: stop playback BEFORE dispatching the worker.
+    # stop_processing() starts/stops QTimers and touches widgets, so it must
+    # not run on the worker.
+    try:
+        main_window.video_processor.stop_processing()
+    except Exception as e:
+        print(f"[WARN] stop_processing before provider change: {e}")
+
+    def _worker():
+        main_window.function_worker.switch_providers_priority(new_provider)
+        return new_provider
+
+    def _finish(_result):
+        if provider_widget is not None:
+            try:
+                provider_widget.setEnabled(True)
+            except RuntimeError:
+                pass
+        clear_gpu_memory(main_window)
+
+    def _err(exc):
+        print(f"[ERROR] change_execution_provider: {exc}")
+        import traceback
+        traceback.print_exc()
+        if provider_widget is not None:
+            try:
+                provider_widget.setEnabled(True)
+            except RuntimeError:
+                pass
+
+    main_window.ui_task_runner.submit(_worker, on_done=_finish, on_err=_err)
 
 
 def change_threads_number(main_window: "MainWindow", new_threads_number: int) -> None:
@@ -291,6 +309,15 @@ def handle_denoiser_state_change(
                 "[INFO] Exclusive path is inactive. Ensuring KV Extractor is unloaded."
             )
             main_window.function_worker.unload_denoiser_kv_extractor()
+        # Prewarm the KV extractor off the GUI thread so the first face
+        # assignment does not freeze the UI loading two PyTorch checkpoints.
+        def _prewarm_kv_extractor():
+            try:
+                main_window.function_worker.face_denoiser.ensure_kv_extractor_loaded()
+            except Exception as e:
+                print(f"[WARN] KV Extractor prewarm failed: {e}")
+
+        main_window.ui_task_runner.submit(_prewarm_kv_extractor)
     else:
         # If NO denoiser pass will be active, aggressively free VRAM.
         print(
@@ -331,11 +358,10 @@ def handle_average_kv_toggle_change(
     If we do not explicitly set the control value here, the downstream `calculate_assigned_input_embedding`
     will read the out-of-sync previous state, causing inverted logic (ON triggers Concatenation, OFF triggers Averaging).
     """
-    # 1. FORCE UI STATE SYNCHRONIZATION
-    # Ensure the control dictionary knows the new value before calculation methods read it.
     main_window.control[control_name] = new_value
-
-    # 2. RECALCULATE TENSOR MERGING FOR ALL TARGET FACES
+    cache = getattr(main_window, "_kv_merge_cache", None)
+    if cache is not None:
+        cache.clear()
     if hasattr(main_window, "target_faces") and main_window.target_faces:
         for target_face in main_window.target_faces.values():
             # Clear the downstream combined VRAM maps
@@ -652,36 +678,20 @@ def handle_enhancer_model_selection_change(
     common_widget_actions.update_gpu_memory_progressbar(main_window)
 
 def _check_and_manage_face_editor_models(main_window: "MainWindow") -> None:
-    """
-    Central function to load/unload FaceEditor (LivePortrait) models
-    based on the state of BOTH UI controls.
-    """
     models_processor = main_window.models_processor
     function_worker = main_window.function_worker
 
-    # 1. Check if the main 'Edit Face' button (outside the tab) is checked
     is_edit_face_active = main_window.editFacesButton.isChecked()
-
-    # 2. Check if the 'Enable Face Pose/Expression Editor' parameter toggle (inside the tab) is active
-    # We read from 'current_widget_parameters' to get the most up-to-date UI state
     is_face_editor_param_active = main_window.current_widget_parameters.get(
         "FaceEditorEnableToggle", False
     )
-
-    # 3. Check if the 'Enable Face Expression Restorer' parameter toggle is active
     is_expr_restore_active = main_window.current_widget_parameters.get(
         "FaceExpressionEnableBothToggle", False
     )
 
-    # The 'Edit Face' feature is only *truly* active if BOTH its buttons are on.
     true_edit_active = is_edit_face_active and is_face_editor_param_active
-
-    # Any LivePortrait feature is active if (Edit Face is fully on) OR (Expression Restore is on)
     any_editor_feature_active = true_edit_active or is_expr_restore_active
 
-    # Check the *actual* loaded state from the face_editors module. The
-    # PerformRecast ("Recast" mode) models are tracked separately because they
-    # are not part of the LivePortrait face-editor group.
     recast_loaded = any(
         models_processor.models.get(m) is not None
         for m in function_worker.perform_recast.model_group
@@ -692,22 +702,33 @@ def _check_and_manage_face_editor_models(main_window: "MainWindow") -> None:
     )
 
     if any_editor_feature_active and not models_are_currently_loaded:
-        # A feature is ON, but models are OFF.
-        # We don't need to do anything here. The lazy-loader in
-        # FrameWorker/FaceEditors will load them on first use.
-        print(
-            "[INFO] Face Editor/Expression Restorer is active. Models will be lazy-loaded on use."
-        )
-        pass
-    elif not any_editor_feature_active and models_are_currently_loaded:
-        # NO feature is ON, but models *are* loaded. Unload them.
-        print(
-            "[INFO] Face Editor and Expression Restorer are inactive. Unloading LivePortrait models."
-        )
-        function_worker.unload_face_editor_models()
-        if recast_loaded:
-            function_worker.unload_perform_recast_models()
-        common_widget_actions.update_gpu_memory_progressbar(main_window)
+        print("[INFO] Face Editor/Expression Restorer is active. Models will be lazy-loaded on use.")
+        return
+
+    if not any_editor_feature_active and models_are_currently_loaded:
+        if getattr(main_window, "_face_editor_unload_in_flight", False):
+            return
+        main_window._face_editor_unload_in_flight = True
+        captured_recast = recast_loaded
+
+        def _worker():
+            function_worker.unload_face_editor_models()
+            if captured_recast:
+                function_worker.unload_perform_recast_models()
+            return True
+
+        def _finish(_result):
+            main_window._face_editor_unload_in_flight = False
+            common_widget_actions.update_gpu_memory_progressbar(main_window)
+
+        def _err(exc):
+            main_window._face_editor_unload_in_flight = False
+            print(f"[ERROR] unload face editor models: {exc}")
+            import traceback
+            traceback.print_exc()
+            common_widget_actions.update_gpu_memory_progressbar(main_window)
+
+        main_window.ui_task_runner.submit(_worker, on_done=_finish, on_err=_err)
 
 def handle_face_editor_button_click(main_window: "MainWindow"):
     """Called when the 'Edit Faces' button is clicked."""
@@ -794,13 +815,6 @@ def handle_face_expression_eye_blend_toggle(
 
 
 def apply_face_reaging(main_window: "MainWindow", *_args) -> None:
-    """Apply age transformation to the assigned input face for the selected target face.
-
-    Re-computes ArcFace embeddings (and optionally the denoiser KV map) from the
-    age-transformed face image, storing the results on the target face button so
-    frame_worker can use them when FaceReagingEnableToggle is active.
-    """
-    # Guard: do nothing if Swap Faces is not active
     if not main_window.swapfacesButton.isChecked():
         return
 
@@ -809,17 +823,15 @@ def apply_face_reaging(main_window: "MainWindow", *_args) -> None:
         return
 
     face_id = target_face.face_id
-    params: Any = main_window.parameters.get(face_id, {})
+    params = main_window.parameters.get(face_id, {})
 
-    # Guard: do nothing if the toggle is currently disabled
     if not params.get("FaceReagingEnableToggle", False):
         return
 
     if not target_face.assigned_input_faces:
-        print(
-            "[WARN] apply_face_reaging: No input face assigned to the selected target face."
-        )
+        print("[WARN] apply_face_reaging: No input face assigned to the selected target face.")
         return
+
     source_age = int(params.get("FaceReagingSourceAgeSlider", 25))
     target_age_val = int(params.get("FaceReagingTargetAgeSlider", 70))
 
@@ -834,50 +846,35 @@ def apply_face_reaging(main_window: "MainWindow", *_args) -> None:
         print("[WARN] apply_face_reaging: Input face has no cropped image.")
         return
 
-    try:
+    def _worker():
+        import traceback
+        import numpy as np
+        import torch
+        from torchvision.transforms import v2
+        from PIL import Image
+        from app.processors.models_data import arcface_mapping_model_dict
+
         models_processor = main_window.models_processor
         function_worker = main_window.function_worker
 
-        # BGR numpy → RGB CHW uint8 tensor
         face_rgb_np = np.ascontiguousarray(cropped_face_bgr[..., ::-1])
-        face_chw = torch.from_numpy(face_rgb_np).permute(2, 0, 1)  # CHW uint8
-
-        # Ensure 512 × 512
+        face_chw = torch.from_numpy(face_rgb_np).permute(2, 0, 1)
         if face_chw.shape[1] != 512 or face_chw.shape[2] != 512:
             face_chw = v2.Resize((512, 512), antialias=False)(face_chw)
 
-        # Run re-aging
-        aged_chw = function_worker.apply_reaging(
-            face_chw, source_age, target_age_val
-        )  # CHW uint8 RGB
-
-        # Move to the device for recognition
+        aged_chw = function_worker.apply_reaging(face_chw, source_age, target_age_val)
         aged_chw_dev = aged_chw.to(models_processor.device)
 
-        # Approximate 5-point keypoints for the 512 × 512 face crop
         h, w = aged_chw.shape[1], aged_chw.shape[2]
-        approx_kps_5 = np.array(
-            [
-                [w * 0.3, h * 0.40],  # left eye
-                [w * 0.7, h * 0.40],  # right eye
-                [w * 0.5, h * 0.55],  # nose
-                [w * 0.35, h * 0.70],  # left mouth corner
-                [w * 0.65, h * 0.70],  # right mouth corner
-            ],
-            dtype=np.float32,
-        )
+        approx_kps_5 = np.array([
+            [w * 0.3, h * 0.40],
+            [w * 0.7, h * 0.40],
+            [w * 0.5, h * 0.55],
+            [w * 0.35, h * 0.70],
+            [w * 0.65, h * 0.70],
+        ], dtype=np.float32)
 
-        similarity_type = str("Auto")
-
-        # Determine which arcface models to recompute. Filter strictly to known
-        # arcface model names so that non-model keys (e.g. "kps_5") that may also
-        # live inside assigned_input_embedding are never passed to run_recognize_direct.
-        # Local import kept to prevent circular dependency with models_data
-        from app.processors.models_data import arcface_mapping_model_dict
-
-        _valid_arcface_models: set = set(arcface_mapping_model_dict.values())
-
-        # Guard against None / empty assigned_input_embedding
+        _valid_arcface_models = set(arcface_mapping_model_dict.values())
         _assigned = target_face.assigned_input_embedding
         models_to_compute = (
             (set(_assigned.keys()) & _valid_arcface_models) if _assigned else set()
@@ -889,48 +886,49 @@ def apply_face_reaging(main_window: "MainWindow", *_args) -> None:
         for arcface_model in models_to_compute:
             try:
                 embedding, _ = function_worker.run_recognize_direct(
-                    aged_chw_dev, approx_kps_5, similarity_type, arcface_model
+                    aged_chw_dev, approx_kps_5, "Auto", arcface_model
                 )
                 if embedding is not None and embedding.size > 0:
                     aged_embeddings[arcface_model] = embedding
             except Exception as e_emb:
-                print(
-                    f"[WARN] apply_face_reaging: embedding for '{arcface_model}' failed: {e_emb}"
-                )
+                print(f"[WARN] apply_face_reaging: embedding for '{arcface_model}' failed: {e_emb}")
 
-        target_face.aged_input_embedding = aged_embeddings
-
-        # Recompute KV map if denoiser is active
+        aged_kv_map = None
         control = main_window.control
         denoiser_on = (
             control.get("DenoiserUNetEnableBeforeRestorersToggle", False)
             or control.get("DenoiserAfterFirstRestorerToggle", False)
             or control.get("DenoiserAfterRestorersToggle", False)
         )
-
         if denoiser_on:
             try:
                 aged_hwc = aged_chw.permute(1, 2, 0).cpu().numpy()
                 pil_img = Image.fromarray(aged_hwc)
                 with function_worker.denoiser_kv_extraction_lock:
-                    kv_map = function_worker.get_kv_map_for_face(pil_img)
-                target_face.aged_kv_map = kv_map
+                    aged_kv_map = function_worker.get_kv_map_for_face(pil_img)
             except Exception as e_kv:
                 print(f"[ERROR] apply_face_reaging: KV map extraction failed: {e_kv}")
-                target_face.aged_kv_map = None
-        else:
-            target_face.aged_kv_map = None
+                traceback.print_exc()
+                aged_kv_map = None
 
+        return aged_embeddings, aged_kv_map
+
+    def _finish(result):
+        aged_embeddings, aged_kv_map = result
+        target_face.aged_input_embedding = aged_embeddings
+        target_face.aged_kv_map = aged_kv_map
         print(
             f"[INFO] apply_face_reaging: Applied (source={source_age}, target={target_age_val}) "
             f"for face {face_id}. Embeddings computed for: {list(aged_embeddings.keys())}"
         )
-
         common_widget_actions.refresh_frame(main_window)
 
-    except Exception as exc:
+    def _err(exc):
         print(f"[ERROR] apply_face_reaging: {exc}")
+        import traceback
         traceback.print_exc()
+
+    main_window.ui_task_runner.submit(_worker, on_done=_finish, on_err=_err)
 
 
 def update_video_slider_step(main_window: "MainWindow", new_step) -> None:

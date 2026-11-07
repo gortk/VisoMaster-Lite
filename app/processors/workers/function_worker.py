@@ -223,18 +223,14 @@ class FunctionWorker:
     # HARDWARE ORCHESTRATION
 
     def clear_gpu_memory(self) -> None:
-        """
-        Force-unloads every loaded model (ONNX, DFM, KV Extractor, CLIP) and
-        releases all GPU memory safely across all sub-processors.
-        """
+        """Force-unloads every loaded model."""
         print("[INFO] Clearing GPU Memory: Unloading all models...")
-        # 1. Stop processing to ensure no workers try to access models during unload
-        self.mp.main_window.video_processor.stop_processing()
+        # NOTE: stop_processing() intentionally removed — it starts/stops
+        # QTimers and touches widgets, so it MUST run on the GUI thread.
+        # The GUI caller (control_actions.clear_gpu_memory) stops processing
+        # before submitting this method to the worker.
 
         # --- Clear Global Target Face KV Caches ---
-        # The Denoiser generates massive PyTorch KV cache tensors per face.
-        # Because they are attached to the global UI target_faces dictionary,
-        # they permanently survive "Clear VRAM" unless explicitly deleted here.
         try:
             for target_face in self.mp.main_window.target_faces.values():
                 target_face.assigned_kv_map = None
@@ -243,7 +239,6 @@ class FunctionWorker:
         except Exception as e:
             print(f"[WARN] Could not clear target face KV caches: {e}")
 
-        # 2. Bypass KeepModelsAliveToggle
         self.mp.force_unload_in_progress = True
         try:
             self.unload_face_detector_models()
@@ -264,13 +259,10 @@ class FunctionWorker:
         finally:
             self.mp.force_unload_in_progress = False
 
-        # 3. Clean up VRAM
         import gc
-
         gc.collect()
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
-
         print("[INFO] GPU Memory Cleared.")
 
     def switch_providers_priority(self, provider_name: str) -> str:

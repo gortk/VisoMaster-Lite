@@ -1506,9 +1506,9 @@ def advance_video_slider_by_n_frames(main_window: "MainWindow", n=None):
         # 2. Check if this is a single frame step (like 'V' key)
         is_single_frame_step = n == 1
 
-        # 3. Run AI models. Explicitly suppress raw preview if special mode is active!
+        # 3. Run AI models asynchronously.
         main_window.video_processor.process_current_frame(
-            synchronous=is_single_frame_step, suppress_raw_preview=suppress_flash
+            suppress_raw_preview=suppress_flash
         )
 
 
@@ -1550,9 +1550,9 @@ def rewind_video_slider_by_n_frames(main_window: "MainWindow", n=None):
         # 2. Check if this is a single frame step (like 'C' key)
         is_single_frame_step = n == 1
 
-        # 3. Run AI models. Explicitly suppress raw preview if special mode is active!
+        # 3. Run AI models asynchronously.
         main_window.video_processor.process_current_frame(
-            synchronous=is_single_frame_step, suppress_raw_preview=suppress_flash
+            suppress_raw_preview=suppress_flash
         )
 
 
@@ -1829,6 +1829,15 @@ def record_video(main_window: "MainWindow", checked: bool):
             main_window.buttonMediaRecord.blockSignals(False)
             set_record_button_icon_to_stop(main_window)
             return
+        if getattr(video_processor, "finalization_in_progress", False):
+            print(
+                "[WARN] Previous recording is still finalizing. Please wait."
+            )
+            main_window.buttonMediaRecord.blockSignals(True)
+            main_window.buttonMediaRecord.setChecked(False)
+            main_window.buttonMediaRecord.blockSignals(False)
+            set_record_button_icon_to_play(main_window)
+            return
         if not str(main_window.control.get("OutputMediaFolder", "")).strip():
             common_widget_actions.create_and_show_messagebox(
                 main_window,
@@ -2028,8 +2037,6 @@ def initialize_media_button_icons(main_window: "MainWindow"):
         "previousMarkerButton": ":/media/media/previous_marker_hover.png",
         "nextMarkerButton": ":/media/media/next_marker_hover.png",
         "liveSoundButton": ":/media/media/audio_toggle.png",
-        "viewFullScreenButton": ":/media/media/fullscreen_v2.png",
-        "theatreModeButton": ":/media/media/theatre_mode.png",
     }
     for button_name, icon_path in icon_map.items():
         button = getattr(main_window, button_name, None)
@@ -2358,7 +2365,35 @@ def process_swap_faces(main_window: "MainWindow"):
     dialog paints even while the main thread is occupied.
     """
     video_processor = main_window.video_processor
-    video_processor.process_current_frame(synchronous=True)
+    video_processor.process_current_frame()
+
+def _process_frame_and_wait(main_window: "MainWindow", timeout_ms: int = 60000) -> None:
+    """Run process_current_frame async on a nested QEventLoop.
+
+    Keeps the GUI event loop pumping (unlike a blocking synchronous worker)
+    while waiting for the single-frame result.
+    """
+    loop = QtCore.QEventLoop()
+    signal = main_window.video_processor.single_frame_processed_signal
+
+    def _on_done(*_args):
+        loop.quit()
+
+    signal.connect(_on_done)
+    timer = QtCore.QTimer()
+    timer.setSingleShot(True)
+    timer.timeout.connect(loop.quit)
+    timer.start(timeout_ms)
+    try:
+        main_window.video_processor.process_current_frame()
+        loop.exec()
+    finally:
+        timer.stop()
+        try:
+            signal.disconnect(_on_done)
+        except (RuntimeError, TypeError):
+            pass
+
 
 
 def process_edit_faces(main_window: "MainWindow"):
@@ -2367,7 +2402,7 @@ def process_edit_faces(main_window: "MainWindow"):
     Runs synchronously for the same reason as process_swap_faces.
     """
     video_processor = main_window.video_processor
-    video_processor.process_current_frame(synchronous=True)
+    video_processor.process_current_frame()
 
 
 def process_compare_checkboxes(main_window: "MainWindow"):
@@ -2670,9 +2705,7 @@ def process_batch_images(main_window: "MainWindow", process_all_faces: bool):
                                 ] = embed.embedding_store
                             target_face.calculate_assigned_input_embedding()
 
-                        main_window.video_processor.process_current_frame(
-                            synchronous=True
-                        )
+                        _process_frame_and_wait(main_window)
 
                     else:
                         # --- "CURRENT CONFIG" LOGIC (Image) ---
@@ -2741,6 +2774,11 @@ def process_batch_images(main_window: "MainWindow", process_all_faces: bool):
                     while (
                         main_window.video_processor.processing
                         or main_window.video_processor.is_processing_segments
+                        or getattr(
+                            main_window.video_processor,
+                            "finalization_in_progress",
+                            False,
+                        )
                     ):
                         QtWidgets.QApplication.processEvents()  # Process UI events (like cancel button)
 
@@ -2849,7 +2887,7 @@ def process_batch_images(main_window: "MainWindow", process_all_faces: bool):
                         f"[ERROR] Failed to re-open original media capture: {original_media_path}"
                     )
 
-                main_window.video_processor.process_current_frame(synchronous=True)
+                _process_frame_and_wait(main_window)
 
             elif main_window.video_processor.file_type == "image":
                 # Correctly restore the slider for the image
@@ -2858,7 +2896,7 @@ def process_batch_images(main_window: "MainWindow", process_all_faces: bool):
                 main_window.videoSeekSlider.setValue(0)
                 main_window.videoSeekSlider.blockSignals(False)
                 main_window.video_processor.max_frame_number = 0
-                main_window.video_processor.process_current_frame(synchronous=True)
+                _process_frame_and_wait(main_window)
         else:
             # If no media was loaded, clear the scene
             main_window.scene.clear()

@@ -17,6 +17,22 @@ from app.ui.widgets.actions import filter_actions
 from app.ui.widgets.actions import target_videos_list_actions
 from app.ui.widgets.settings_layout_data import CAMERA_BACKENDS
 from app.processors.video_utils.issue_scanner import IssueScanner
+from collections import deque
+
+def _iter_bounded(executor, fn, items, window):
+    """Yield results in input order, with at most `window` tasks in flight."""
+    pending = deque()
+    it = iter(items)
+    try:
+        for item in it:
+            pending.append(executor.submit(fn, *item))
+            if len(pending) >= window:
+                yield pending.popleft().result()
+        while pending:
+            yield pending.popleft().result()
+    finally:
+        for fut in pending:
+            fut.cancel()
 
 if TYPE_CHECKING:
     from app.ui.main_ui import MainWindow
@@ -189,16 +205,17 @@ class TargetMediaLoaderWorker(qtc.QThread):
             # Fallback for extraction failure to prevent UI progress bar hanging
             return (media_file_path, QImage(), "error", media_id, None)
 
-        # Determine thread count safely, capping at 16 to avoid OS resource exhaustion
         max_workers = min(16, (os.cpu_count() or 1) + 4)
+        window = max_workers * 3  # thumbnails are cheap; allow a bit more pipelining
 
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            for result in executor.map(lambda p: extract_task(*p), paired_files_ids):
+            for result in _iter_bounded(
+                executor, extract_task, paired_files_ids, window
+            ):
                 if not self._running:
                     executor.shutdown(wait=False, cancel_futures=True)
                     break
                 if result:
-                    # Thread-safe signal emission to the main GUI thread
                     self.thumbnail_ready.emit(*result)
 
     def stop(self):
@@ -266,11 +283,16 @@ class IssueScanWorker(qtc.QThread):
                 return
 
             start_time = time.monotonic()
+            _last_emit = [0.0]
 
             def progress_with_fps(
                 processed: int, total: int, frame_number: int
             ) -> None:
-                elapsed = time.monotonic() - start_time
+                now = time.monotonic()
+                if processed < total and now - _last_emit[0] < 0.1:
+                    return
+                _last_emit[0] = now
+                elapsed = now - start_time
                 scan_fps = (processed / elapsed) if elapsed > 0 else 0.0
                 self.progress.emit(processed, total, frame_number, scan_fps)
 
@@ -355,12 +377,9 @@ class InputFacesLoaderWorker(qtc.QThread):
     def load_faces(
         self, folder_name: bool | str = False, files_list: Optional[List[str]] = None
     ) -> None:
-        # Use the snapshot - thread-safe
         control = self.control_snapshot
         files_list = files_list or []
 
-        # OPTIMIZED: Pair the file paths with their correct IDs before any processing
-        # This prevents ID shifting if an image fails, and avoids destructive sorting.
         paired_files_ids: List[Tuple[str, str]] = []
 
         if folder_name and isinstance(folder_name, str):
@@ -368,13 +387,12 @@ class InputFacesLoaderWorker(qtc.QThread):
                 folder_name,
                 bool(control.get("InputFacesFolderRecursiveToggle", False)),
             )
-            image_files.sort()  # Safe to sort here, IDs are generated fresh
+            image_files.sort()
             for path in image_files:
                 paired_files_ids.append(
                     (os.path.join(folder_name, path), str(uuid.uuid1().int))
                 )
         elif files_list:
-            # DO NOT SORT if loading from a workspace, keep original saved order
             for idx, path in enumerate(files_list):
                 f_id = self.face_ids[idx] if self.face_ids else str(uuid.uuid1().int)
                 paired_files_ids.append((path, f_id))
@@ -382,35 +400,32 @@ class InputFacesLoaderWorker(qtc.QThread):
         def load_image_task(
             image_path: str, f_id: str
         ) -> Tuple[str, str, Optional[numpy.ndarray]]:
-            """Background CPU task to read and prepare image bytes."""
             if not misc_helpers.is_image_file(image_path):
                 return image_path, f_id, None
             frame = misc_helpers.read_image_file(image_path)
             if frame is None:
                 return image_path, f_id, None
-            # Swap channels from BGR to RGB concurrently
-            return image_path, f_id, frame[..., ::-1]
+            return image_path, f_id, frame
 
         max_workers = min(16, (os.cpu_count() or 1) + 4)
+        window = max_workers
 
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            for image_file_path, face_id, frame in executor.map(
-                lambda p: load_image_task(*p), paired_files_ids
+            for image_file_path, face_id, frame in _iter_bounded(
+                executor, load_image_task, paired_files_ids, window
             ):
-                if not self._running:  # Check if the thread is still running
+                if not self._running:
                     executor.shutdown(wait=False, cancel_futures=True)
                     break
 
                 if frame is None:
                     continue
 
-                # WORKER SAFETY: Wrap the entire GPU image processing in a try/except block.
-                # All CUDA tensor operations MUST execute here synchronously to prevent
-                # Context errors or GPU race conditions.
                 try:
-                    img = torch.from_numpy(frame.astype("uint8")).to(
+                    img = torch.from_numpy(numpy.ascontiguousarray(frame)).to(
                         self.main_window.models_processor.device
                     )
+                    img = img.flip(-1)
                     img = img.permute(2, 0, 1)
 
                     _, kpss_5, _ = self.main_window.function_worker.run_detect(
@@ -439,55 +454,55 @@ class InputFacesLoaderWorker(qtc.QThread):
                         continue
 
                     face_kps = kpss_5[0]
-                    if face_kps.any():
-                        # Calculate embedding ONLY for the selected recognition model
-                        selected_recognition_model = str(
-                            control.get(
-                                "RecognitionModelSelection", "Inswapper128ArcFace"
-                            )
+                    if not face_kps.any():
+                        continue
+
+                    selected_recognition_model = str(
+                        control.get("RecognitionModelSelection", "Inswapper128ArcFace")
+                    )
+                    similarity_type = str("Auto")
+                    face_emb, cropped_img = (
+                        self.main_window.function_worker.run_recognize_direct(
+                            img,
+                            face_kps,
+                            similarity_type,
+                            selected_recognition_model,
                         )
-                        similarity_type = str("Auto")
-                        face_emb, cropped_img = (
-                            self.main_window.function_worker.run_recognize_direct(
-                                img,
-                                face_kps,
-                                similarity_type,
-                                selected_recognition_model,  # Use selected model
-                            )
-                        )
+                    )
 
-                        if face_emb is None:  # Check if recognition failed
-                            continue
+                    if face_emb is None:
+                        continue
 
-                        cropped_img_np = cropped_img.cpu().numpy()
-                        # Swap channels from RGB to BGR for pixmap creation
-                        face_img = numpy.ascontiguousarray(cropped_img_np[..., ::-1])
+                    cropped_img_np = cropped_img.cpu().numpy()
+                    face_img = numpy.ascontiguousarray(cropped_img_np[..., ::-1])
 
-                        # QIMAGE THREAD-SAFE
-                        height, width, channel = face_img.shape
-                        bytes_per_line = 3 * width
-                        q_image = QImage(
-                            face_img.data,
-                            width,
-                            height,
-                            bytes_per_line,
-                            QImage.Format_BGR888,
-                        ).copy()
+                    height, width, channel = face_img.shape
+                    bytes_per_line = 3 * width
+                    q_image = QImage(
+                        face_img.data,
+                        width,
+                        height,
+                        bytes_per_line,
+                        QImage.Format_BGR888,
+                    ).copy()
 
-                        embedding_store: Dict[str, numpy.ndarray] = {
-                            selected_recognition_model: face_emb,
-                            "kps_5": face_kps,
-                        }
+                    embedding_store: Dict[str, numpy.ndarray] = {
+                        selected_recognition_model: face_emb,
+                        "kps_5": face_kps,
+                    }
 
-                        self.thumbnail_ready.emit(
-                            image_file_path, face_img, embedding_store, q_image, face_id
-                        )
+                    self.thumbnail_ready.emit(
+                        image_file_path, face_img, embedding_store, q_image, face_id
+                    )
+
+                    del img, face_emb, cropped_img, cropped_img_np, face_img
 
                 except Exception as e:
                     print(
-                        f"[ERROR] InputFacesLoaderWorker: Failed to process {image_file_path}. Reason: {e}"
+                        f"[ERROR] InputFacesLoaderWorker: Failed to process "
+                        f"{image_file_path}. Reason: {e}"
                     )
-                    continue  # Skip this specific corrupt image and continue the loop
+                    continue
 
     def stop(self):
         # Stop the thread by setting the running flag to False.

@@ -10,6 +10,11 @@ import app.helpers.miscellaneous as misc_helpers
 if TYPE_CHECKING:
     from app.ui.main_ui import MainWindow
 
+_HANDLED_EVENTS = frozenset({
+    QtCore.QEvent.Type.MouseButtonPress,
+    QtCore.QEvent.Type.DragEnter,
+    QtCore.QEvent.Type.Drop,
+})
 
 class GraphicsViewEventFilter(QtCore.QObject):
     def __init__(self, main_window: "MainWindow", parent=None):
@@ -38,21 +43,21 @@ class videoSeekSliderLineEditEventFilter(QtCore.QObject):
             if event.key() in (QtCore.Qt.Key_Enter, QtCore.Qt.Key_Return):
                 if video_control_actions.is_issue_scan_active(self.main_window):
                     return True
-                new_value = line_edit.text()
-                # Reset the line edit value to the slider value if the user input an empty text
-                if new_value == "":
-                    new_value = str(self.main_window.videoSeekSlider.value())
+                text = line_edit.text().strip()
+                if not text:
+                    new_value = int(self.main_window.videoSeekSlider.value())
                 else:
-                    new_value = int(new_value)
-                    max_frame_number = self.main_window.video_processor.max_frame_number
-                    # If the value entered by user if greater than the max no of frames in the video, set the new value to the max_frame_number
-                    if new_value > max_frame_number:
-                        new_value = max_frame_number
-                # Update values of line edit and slider
+                    try:
+                        new_value = int(text)
+                    except ValueError:
+                        new_value = int(self.main_window.videoSeekSlider.value())
+                    new_value = max(
+                        0,
+                        min(new_value, self.main_window.video_processor.max_frame_number),
+                    )
                 line_edit.setText(str(new_value))
                 self.main_window.videoSeekSlider.setValue(new_value)
-                self.main_window.video_processor.process_current_frame()  # Process the current frame
-
+                self.main_window.video_processor.process_current_frame()
                 return True
         return False
 
@@ -98,17 +103,73 @@ class ListWidgetEventFilter(QtCore.QObject):
     def __init__(self, main_window: "MainWindow", parent=None):
         super().__init__(parent)
         self.main_window = main_window
+        self._pending_loads: dict[str, list[list[str]]] = {}
+
+    def _spec_for(self, list_widget):
+        if list_widget in (self.main_window.targetVideosList,
+                           self.main_window.targetVideosList.viewport()):
+            return {
+                "loader_attr": "video_loader_worker",
+                "loader_cls": ui_workers.TargetMediaLoaderWorker,
+                "thumb_cb": list_view_actions.add_media_thumbnail_to_target_videos_list,
+                "is_valid": lambda p: (
+                    misc_helpers.is_image_file(p) or misc_helpers.is_video_file(p)
+                ),
+                "block_msg": "change target media",
+            }
+        if list_widget in (self.main_window.inputFacesList,
+                           self.main_window.inputFacesList.viewport()):
+            return {
+                "loader_attr": "input_faces_loader_worker",
+                "loader_cls": ui_workers.InputFacesLoaderWorker,
+                "thumb_cb": list_view_actions.add_media_thumbnail_to_source_faces_list,
+                "is_valid": misc_helpers.is_image_file,
+                "block_msg": "load input faces",
+            }
+        return None
+
+    def _drain_loader(self, spec):
+        attr = spec["loader_attr"]
+        current = getattr(self.main_window, attr, None)
+        if current is not None and current.isRunning():
+            return
+        queue = self._pending_loads.get(attr)
+        if not queue:
+            return
+        files = queue.pop(0)
+        worker = spec["loader_cls"](
+            main_window=self.main_window, folder_name=False, files_list=files,
+        )
+        worker.thumbnail_ready.connect(partial(spec["thumb_cb"], self.main_window))
+        worker.finished.connect(lambda s=spec: self._drain_loader(s))
+        setattr(self.main_window, attr, worker)
+        worker.start()
+
+    def _drop_media(self, event, spec):
+        if video_control_actions.block_if_issue_scan_active(
+            self.main_window, spec["block_msg"]
+        ):
+            event.ignore()
+            return True
+        paths = [
+            u.toLocalFile()
+            for u in event.mimeData().urls()
+            if spec["is_valid"](u.toLocalFile())
+        ]
+        if paths:
+            self._pending_loads.setdefault(spec["loader_attr"], []).append(paths)
+            self._drain_loader(spec)
+        event.acceptProposedAction()
+        return True
+
 
     def eventFilter(
         self,
         list_widget: QtWidgets.QListWidget,
         event: QtCore.QEvent | QtGui.QDropEvent | QtGui.QMouseEvent,
     ):
-        # During application shutdown, Qt deletes the C++ widgets before the
-        # Python wrappers; events may still fire on this filter while the
-        # underlying QListWidget / its viewport have already been destroyed.
-        # Touching them then raises shiboken's "Internal C++ object … already
-        # deleted." Bail out cleanly so the atexit traceback stops appearing.
+        if event.type() not in _HANDLED_EVENTS:
+            return False
         try:
             target_videos_list = self.main_window.targetVideosList
             target_videos_viewport = target_videos_list.viewport()
@@ -126,48 +187,19 @@ class ListWidgetEventFilter(QtCore.QObject):
                     list_view_actions.select_target_medias(self.main_window, "folder")
 
             elif event.type() == QtCore.QEvent.Type.DragEnter:
-                # Accept drag events with URLs
                 if event.mimeData().hasUrls():
-                    urls = event.mimeData().urls()
-                    print("[INFO] DragEnter: URLS", len(urls))
-                    event.acceptProposedAction()
-                    return True
+                    if any(
+                        misc_helpers.is_image_file(u.toLocalFile())
+                        or misc_helpers.is_video_file(u.toLocalFile())
+                        for u in event.mimeData().urls()
+                    ):
+                        event.acceptProposedAction()
+                        return True
+                return False
             # Handle the drop event
             elif event.type() == QtCore.QEvent.Type.Drop:
                 if event.mimeData().hasUrls():
-                    if video_control_actions.block_if_issue_scan_active(
-                        self.main_window, "change target media"
-                    ):
-                        event.ignore()
-                        return True
-                    # Extract file paths
-                    file_paths = []
-                    for url in event.mimeData().urls():
-                        url = url.toLocalFile()
-                        if misc_helpers.is_image_file(
-                            url
-                        ) or misc_helpers.is_video_file(url):
-                            file_paths.append(url)
-                        else:
-                            print(f"[ERROR] Drop: {url} is not a Video or Image file")
-                    # print("Drop: URLS", [url.toLocalFile() for url in urls])
-                    if file_paths:
-                        self.main_window.video_loader_worker = (
-                            ui_workers.TargetMediaLoaderWorker(
-                                main_window=self.main_window,
-                                folder_name=False,
-                                files_list=file_paths,
-                            )
-                        )
-                        self.main_window.video_loader_worker.thumbnail_ready.connect(
-                            partial(
-                                list_view_actions.add_media_thumbnail_to_target_videos_list,
-                                self.main_window,
-                            )
-                        )
-                        self.main_window.video_loader_worker.start()
-                    event.acceptProposedAction()
-                    return True
+                    return self._drop_media(event, self._spec_for(list_widget))
 
         elif list_widget == input_faces_list or list_widget == input_faces_viewport:
             if event.type() == QtCore.QEvent.Type.MouseButtonPress:
@@ -180,44 +212,16 @@ class ListWidgetEventFilter(QtCore.QObject):
                     )
 
             elif event.type() == QtCore.QEvent.Type.DragEnter:
-                # Accept drag events with URLs
                 if event.mimeData().hasUrls():
-                    urls = event.mimeData().urls()
-                    print("[INFO] DragEnter: URLS", len(urls))
-                    event.acceptProposedAction()
-                    return True
+                    if any(
+                        misc_helpers.is_image_file(u.toLocalFile())
+                        for u in event.mimeData().urls()
+                    ):
+                        event.acceptProposedAction()
+                        return True
+                return False
             # Handle the drop event
             elif event.type() == QtCore.QEvent.Type.Drop:
                 if event.mimeData().hasUrls():
-                    if video_control_actions.block_if_issue_scan_active(
-                        self.main_window, "load input faces"
-                    ):
-                        event.ignore()
-                        return True
-                    # Extract file paths
-                    file_paths = []
-                    for url in event.mimeData().urls():
-                        url = url.toLocalFile()
-                        if misc_helpers.is_image_file(url):
-                            file_paths.append(url)
-                        else:
-                            print(f"[ERROR] Drop: {url} is not an Image file")
-                    # print("Drop: URLS", [url.toLocalFile() for url in urls])
-                    if file_paths:
-                        self.main_window.input_faces_loader_worker = (
-                            ui_workers.InputFacesLoaderWorker(
-                                main_window=self.main_window,
-                                folder_name=False,
-                                files_list=file_paths,
-                            )
-                        )
-                        self.main_window.input_faces_loader_worker.thumbnail_ready.connect(
-                            partial(
-                                list_view_actions.add_media_thumbnail_to_source_faces_list,
-                                self.main_window,
-                            )
-                        )
-                        self.main_window.input_faces_loader_worker.start()
-                    event.acceptProposedAction()
-                    return True
+                    return self._drop_media(event, self._spec_for(list_widget))
         return super().eventFilter(list_widget, event)

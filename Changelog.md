@@ -1,3 +1,12 @@
+### 1.0.3
+
+- A lot of code refactor to try to separate ui threads
+- Fixed "drop files here..." appearing in the target pane after files are loaded in it
+- Added a new "Loading..." transparent watermark on the preview when the app is loading models.
+- Added a simple splash screen when the app is loading.
+- Hopefuly Fix the K/V map that survives face removal.
+  current_kv_tensors_map on the main window can still point at the removed face’s assigned_kv_map, so the tensors stay on the GPU. (memory leak)
+
 ### 1.0.2
 
 - Added a basic extensions support. In the new 'extensions' folder you will find an example extension

@@ -17,7 +17,7 @@ All methods are only ever called in the GUI thread; ``ModelsProcessor`` talks
 to the dialog purely through queued signals, so builds can be driven from any
 worker thread.
 """
-
+import collections
 import time
 
 from PySide6 import QtCore, QtGui, QtWidgets
@@ -90,6 +90,13 @@ class TrtBuildDialog(QtWidgets.QDialog):
         log_font.setStyleHint(QtGui.QFont.StyleHint.Monospace)
         self.log_view.setFont(log_font)
         self.log_view.setVisible(False)
+        self._log_buffer: collections.deque[str] = collections.deque(
+            maxlen=self._LOG_MAX_BLOCKS
+        )
+        self._log_flush_timer = QtCore.QTimer(self)
+        self._log_flush_timer.setSingleShot(True)
+        self._log_flush_timer.setInterval(150)
+        self._log_flush_timer.timeout.connect(self._flush_log)
         layout.addWidget(self.log_view)
         self.details_button.toggled.connect(self._on_details_toggled)
 
@@ -101,7 +108,7 @@ class TrtBuildDialog(QtWidgets.QDialog):
         layout.addLayout(button_row)
 
         self._elapsed_timer = QtCore.QTimer(self)
-        self._elapsed_timer.setInterval(500)
+        self._elapsed_timer.setInterval(1000)
         self._elapsed_timer.timeout.connect(self._update_time_label)
 
     # -- API used by ModelsProcessor (GUI thread only) ------------------------
@@ -139,8 +146,17 @@ class TrtBuildDialog(QtWidgets.QDialog):
         self.raise_()
 
     def append_log_line(self, line: str) -> None:
-        """Append one streamed probe log line to the details view."""
-        self.log_view.appendPlainText(line.rstrip())
+        """Queue one streamed probe log line; flushed on a short timer."""
+        self._log_buffer.append(line.rstrip())
+        if not self._log_flush_timer.isActive():
+            self._log_flush_timer.start()
+
+    def _flush_log(self) -> None:
+        if not self._log_buffer:
+            return
+        text = "\n".join(self._log_buffer)
+        self._log_buffer.clear()
+        self.log_view.appendPlainText(text)
 
     def set_stage(self, stage_label: str) -> None:
         """Update the human-readable build phase label."""
@@ -154,11 +170,15 @@ class TrtBuildDialog(QtWidgets.QDialog):
         """Close the dialog after the build attempt ends."""
         self._build_active = False
         self._elapsed_timer.stop()
+        self._log_flush_timer.stop()
+        self._flush_log()
         self.close()
 
     # -- internals ------------------------------------------------------------
 
     def _on_details_toggled(self, checked: bool) -> None:
+        if checked:
+            self._flush_log()
         self.log_view.setVisible(checked)
         self.details_button.setText("Hide details" if checked else "Show details")
         self.adjustSize()

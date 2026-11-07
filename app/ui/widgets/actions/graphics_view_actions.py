@@ -90,6 +90,19 @@ def fit_image_to_view(
 ):
     """Reset the view and fit the image to the view, keeping the aspect ratio."""
     graphicsViewFrame = main_window.graphicsViewFrame
-    graphicsViewFrame.resetTransform()
-    graphicsViewFrame.setSceneRect(scene_rect)
-    graphicsViewFrame.fitInView(pixmap_item, QtCore.Qt.AspectRatioMode.KeepAspectRatio)
+    try:
+        view_scene = graphicsViewFrame.scene()
+        if pixmap_item is None or view_scene is None:
+            return
+        if pixmap_item.scene() is not view_scene:
+            return
+        graphicsViewFrame.resetTransform()
+        graphicsViewFrame.setSceneRect(scene_rect)
+        graphicsViewFrame.fitInView(
+            pixmap_item, QtCore.Qt.AspectRatioMode.KeepAspectRatio
+        )
+    except RuntimeError:
+        # pixmap_item (or the scene) was deleted between scheduling and
+        # execution — e.g. when a workspace load triggers a media reload
+        # while a deferred fit is still pending. Nothing to do.
+        return
