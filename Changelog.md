@@ -1,11 +1,11 @@
-1.0.1
+### 1.0.1
 
 - Re added target pane search: made a simple search like for the embeddings, no extra filtering.
 - The app will no longer try to "play" an image file if the user clicks it in the preview window.
 - The app now saves the size of the thumbnails in the target pane.
 
 
-Initial release 1.0.0
+### Initial release 1.0.0
 
 Removed:
 - Search in the target pane
