@@ -19,11 +19,13 @@ class GraphicsViewEventFilter(QtCore.QObject):
     def eventFilter(self, graphics_object: QtWidgets.QGraphicsView, event):
         if event.type() == QtCore.QEvent.Type.MouseButtonPress:
             if event.button() == QtCore.Qt.MouseButton.LeftButton:
+                # Do not attempt to play if the loaded media is an image
+                if getattr(self.main_window.video_processor, "file_type", None) == "image":
+                    return False
+                    
                 self.main_window.buttonMediaPlay.click()
-                # You can emit a signal or call another function here
                 return True  # Mark the event as handled
         return False  # Pass the event to the original handler
-
 
 class videoSeekSliderLineEditEventFilter(QtCore.QObject):
     def __init__(self, main_window: "MainWindow", parent=None):
