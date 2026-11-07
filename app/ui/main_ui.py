@@ -744,6 +744,22 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
             partial(target_videos_list_actions.sort_target_videos, self)
         )
         
+        # --- Target Media Search Box ---
+        self.targetVideosSearchBox = QtWidgets.QLineEdit(self)
+        self.targetVideosSearchBox.setPlaceholderText("Search target media...")
+        self.targetVideosSearchBox.textChanged.connect(
+            partial(filter_actions.filter_target_videos, self)
+        )
+        
+        parent_widget = self.targetVideosList.parentWidget()
+        if parent_widget and parent_widget.layout():
+            layout = parent_widget.layout()
+            idx = layout.indexOf(self.targetVideosList)
+            if idx != -1:
+                layout.insertWidget(idx, self.targetVideosSearchBox)
+            else:
+                layout.addWidget(self.targetVideosSearchBox)
+        
     def update_denoiser_controls_visibility_for_pass(
         self, pass_suffix: str, current_mode_text: str
     ):

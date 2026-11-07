@@ -564,12 +564,14 @@ class FilterWorker(qtc.QThread):
 
     def filter_target_videos(self):
         include_file_types = self.include_file_types
-
         min_width, min_height = self.min_image_size
+        search_text = self.search_text
 
         visible_indices = []
         for index, media_path, file_type, width, height in self.items_snapshot:
             if file_type not in include_file_types:
+                continue
+            if search_text and search_text not in media_path.lower():
                 continue
             # Items whose dimensions are unknown (webcams) are never filtered out
             # by the size sliders.

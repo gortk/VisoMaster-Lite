@@ -17,8 +17,11 @@ def filter_target_videos(main_window: "MainWindow", *args):
     filter_button = getattr(main_window, "targetVideosFilterMenuButton", None)
     filter_panel_open = filter_button is not None and filter_button.isChecked()
 
-    # Early exit when the filter panel is closed
-    if not filter_panel_open:
+    search_box = getattr(main_window, "targetVideosSearchBox", None)
+    search_text = search_box.text().lower() if search_box else ""
+
+    # Early exit when the filter panel is closed AND search text is empty
+    if not filter_panel_open and not search_text:
         for i in range(main_window.targetVideosList.count()):
             main_window.targetVideosList.item(i).setHidden(False)
         return
@@ -64,6 +67,7 @@ def filter_target_videos(main_window: "MainWindow", *args):
     worker = main_window.target_videos_filter_worker
     worker.include_file_types = include_file_types
     worker.min_image_size = (min_width, min_height)
+    worker.search_text = search_text
     worker.items_snapshot = items_snapshot
     worker.start()
 
