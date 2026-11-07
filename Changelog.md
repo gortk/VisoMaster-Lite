@@ -1,9 +1,14 @@
+### 1.0.2
+
+- Added a basic extensions support. In the new 'extensions' folder you will find an example extension
+  open it to read more info on extensions. Change its name removing the leading "_" and it will become
+  active.
+
 ### 1.0.1
 
 - Re added target pane search: made a simple search like for the embeddings, no extra filtering.
 - The app will no longer try to "play" an image file if the user clicks it in the preview window.
 - The app now saves the size of the thumbnails in the target pane.
-
 
 ### Initial release 1.0.0
 
