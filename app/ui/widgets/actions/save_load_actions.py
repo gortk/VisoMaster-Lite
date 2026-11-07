@@ -1219,6 +1219,13 @@ def load_saved_workspace(
                 list_view_actions.apply_face_thumbnail_size(
                     main_window, list_view_actions._FACE_BUTTON_SIZE
                 )
+                
+            saved_target_thumb_size = window_state.get("target_thumbnail_size")
+            if saved_target_thumb_size:
+                list_view_actions.apply_target_thumbnail_size(
+                    main_window, tuple(saved_target_thumb_size)
+                )
+                
             if hasattr(main_window, "scanToolsToggleButton"):
                 video_control_actions.set_scan_tools_expanded(
                     main_window, window_state.get("scan_tools_expanded", False)
@@ -1301,6 +1308,10 @@ def save_current_workspace(
             )
             == list_view_actions._SMALL_FACE_BUTTON_SIZE
             else "large"
+        ),
+        # Add this line:
+        "target_thumbnail_size": getattr(
+            main_window, "target_thumbnail_button_size", (85, 85)
         ),
         "scan_tools_expanded": getattr(main_window, "scan_tools_expanded", False),
         "parameter_section_states": {
