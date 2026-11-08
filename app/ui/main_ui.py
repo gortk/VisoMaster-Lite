@@ -221,6 +221,8 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
         self._deferred_show = False
         self._loading_splash = None
         self._splash_timeout = None
+        self._workspace_load_in_progress = False
+        self._skip_autosave_last_workspace = False
         
         from app.ui.widgets.actions.ui_tasks import TaskRunner
         self.ui_task_runner = TaskRunner(self)
@@ -1209,6 +1211,10 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
 
         if self.quit_without_saving:
             print("[INFO] MainWindow: quitting without saving the workspace.")
+        elif getattr(self, "_skip_autosave_last_workspace", False):
+            print("[INFO] MainWindow: skipping autosave (user declined to load).")
+        elif getattr(self, "_workspace_load_in_progress", False):
+            print("[WARN] MainWindow: skipping autosave (workspace load still running).")
         else:
             save_load_actions.save_current_workspace(
                 self, str(self.last_workspace_path)
@@ -1256,6 +1262,12 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
                 workspace_load_triggered = (
                     result == QtWidgets.QDialog.DialogCode.Accepted
                 )
+                if not workspace_load_triggered:
+                    self._skip_autosave_last_workspace = True
+                    print(
+                        "[INFO] User declined to load last workspace; "
+                        "it will not be overwritten on close."
+                    )
         else:
             options = platform_support.available_execution_providers()
             default_index = options.index(platform_support.default_execution_provider())

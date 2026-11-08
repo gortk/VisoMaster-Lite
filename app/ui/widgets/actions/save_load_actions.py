@@ -33,6 +33,7 @@ _KV_REGISTRY_LOCK = threading.Lock()
 
 
 def _notify_workspace_load_done(main_window) -> None:
+    main_window._workspace_load_in_progress = False
     cb = getattr(main_window, "_on_workspace_load_finished", None)
     if callable(cb):
         try:
@@ -705,14 +706,27 @@ def load_saved_workspace(main_window, data_filename=False):
         with open(data_filename, "r", encoding="utf-8") as data_file:
             data = json.load(data_file)
     except (json.JSONDecodeError, KeyError, TypeError) as e:
+        broken_path = f"{data_filename}.broken.{int(time.time())}"
+        moved = False
+        try:
+            os.rename(data_filename, broken_path)
+            moved = True
+            print(f"[WARN] Broken workspace preserved as {broken_path}")
+        except OSError as re:
+            print(f"[WARN] Could not preserve broken workspace: {re}")
         QtWidgets.QMessageBox.critical(
-            main_window, "Error", f"Failed to load workspace: {e}"
+            main_window,
+            "Error",
+            f"Failed to load workspace: {e}"
+            + (f"\n\nOriginal preserved as:\n{broken_path}" if moved else ""),
         )
+        _notify_workspace_load_done(main_window)
         return
     _workspace_load_begin(main_window, data, data_filename)
 
 
 def _workspace_load_begin(main_window, data, data_filename):
+    main_window._workspace_load_in_progress = True
     try:
         window_state = data.get("window_state_data", {})
         list_view_actions.clear_stop_loading_input_media(main_window)
@@ -1468,12 +1482,17 @@ def save_current_workspace(
     }
 
     if data_filename:
+        tmp_path = f"{data_filename}.tmp"
         try:
-            with open(data_filename, "w", encoding="utf-8") as data_file:
-                data_as_json = json.dumps(
-                    data, indent=4
-                )  # Save with indentation for readability
+            data_as_json = json.dumps(data, indent=4)
+            with open(tmp_path, "w", encoding="utf-8") as data_file:
                 data_file.write(data_as_json)
+                data_file.flush()
+                try:
+                    os.fsync(data_file.fileno())
+                except OSError:
+                    pass
+            os.replace(tmp_path, data_filename)
             if str(data_filename).endswith("last_workspace.json"):
                 print(f"[INFO] Last workspace saved to: {data_filename}")
             else:
@@ -1483,11 +1502,15 @@ def save_current_workspace(
                     f"Saved Workspace to file: {data_filename}",
                 )
         except Exception as e:
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
             print(f"[ERROR] Failed to save workspace {data_filename}: {e}")
             if not (
                 isinstance(data_filename, str)
                 and data_filename.endswith("last_workspace.json")
-            ):  # Don't show error for auto-save
+            ):
                 common_widget_actions.create_and_show_messagebox(
                     main_window,
                     "Save Error",
