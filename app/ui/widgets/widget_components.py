@@ -2440,47 +2440,55 @@ class SelectionBox(QtWidgets.QComboBox, ParametersWidget):
 
     def showPopup(self):
         view = self.view()
-        if view and self.count() > 0:
-            view.setUniformItemSizes(True)
-            view.setVerticalScrollMode(QtWidgets.QAbstractItemView.ScrollPerPixel)
-            row_height = max(view.sizeHintForRow(0), self.sizeHint().height())
-            frame = view.frameWidth() * 2
-            desired_height = (row_height * self.count()) + frame
-            popup_origin = self.mapToGlobal(QtCore.QPoint(0, 0))
-            app = QtWidgets.QApplication.instance()
-            screen = app.screenAt(popup_origin) if app else None
-            if screen is None:
-                screen = self.screen()
-            available = (
-                screen.availableGeometry() if screen else QtCore.QRect(0, 0, 800, 600)
-            )
-            space_below = available.bottom() - (popup_origin.y() + self.height()) - 8
-            space_above = popup_origin.y() - available.top() - 8
-            max_space = max(space_below, space_above, 0)
-
-            if desired_height <= max(space_below, 0):
-                popup_height = desired_height
-            elif desired_height <= max(space_above, 0):
-                popup_height = desired_height
-            else:
-                popup_height = max(min(desired_height, max_space), row_height + frame)
-
-            view.setMinimumHeight(popup_height)
-            view.setMaximumHeight(popup_height)
-        super().showPopup()
-
-    def wheelEvent(self, event: QtGui.QWheelEvent):
-        wheel_control_enabled = bool(
-            self.main_window.control.get("SliderMouseWheelControlToggle", False)
-        )
-        ctrl_pressed = bool(
-            QtWidgets.QApplication.keyboardModifiers()
-            & QtCore.Qt.KeyboardModifier.ControlModifier
-        )
-        if not wheel_control_enabled and not ctrl_pressed:
-            event.ignore()
+        if view is None or self.count() == 0:
+            super().showPopup()
             return
-        super().wheelEvent(event)
+    
+        # Row height (fallback if the view has not laid out yet).
+        row_height = view.sizeHintForRow(0)
+        if row_height <= 0:
+            row_height = max(self.fontMetrics().height() + 8, 24)
+        frame = view.frameWidth() * 2
+        content_height = (row_height * self.count()) + frame
+    
+        # Clamp to the available screen space.
+        popup_origin = self.mapToGlobal(QtCore.QPoint(0, 0))
+        app = QtWidgets.QApplication.instance()
+        screen = app.screenAt(popup_origin) if app else None
+        if screen is None:
+            screen = self.screen()
+        available = (
+            screen.availableGeometry() if screen else QtCore.QRect(0, 0, 800, 600)
+        )
+    
+        space_below = available.bottom() - (popup_origin.y() + self.height()) - 8
+        space_above = popup_origin.y() - available.top() - 8
+    
+        if content_height <= max(space_below, 0):
+            popup_height = content_height
+        elif content_height <= max(space_above, 0):
+            popup_height = content_height
+        else:
+            max_space = max(space_below, space_above, 0)
+            popup_height = max(min(content_height, max_space), row_height + frame)
+    
+        # Size the item view before showing.
+        view.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        view.setFixedHeight(popup_height)
+    
+        super().showPopup()
+    
+        # Some Qt builds cache the popup container size and will not shrink it
+        # when the item count decreases (e.g. after deleting a profile). Force
+        # the popup window to match the (now fixed) view height.
+        popup_window = view.window()
+        if popup_window is not None and popup_window is not view:
+            popup_window.setMinimumHeight(0)
+            popup_window.setMaximumHeight(16777215)
+            chrome = max(4, popup_window.frameWidth() * 2)
+            popup_window.resize(popup_window.width(), view.height() + chrome)
+            # Re-apply in case the resize triggered an internal layout pass.
+            view.setFixedHeight(popup_height)
 
 
 class ToggleButton(QtWidgets.QPushButton, ParametersWidget):
