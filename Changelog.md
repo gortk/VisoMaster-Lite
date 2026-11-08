@@ -1,3 +1,10 @@
+### 1.0.4
+
+- Hopefully fixed the bug where sometimes the last_workspace.json gets corrupted and replaced with a defaults copy.
+- Added the first 'official' extension: inpainting.
+- Fixed the long (unnecessary) menu that appeared in the profiles in face editor.
+
+
 ### 1.0.3
 
 - A lot of code refactor to try to separate ui threads
