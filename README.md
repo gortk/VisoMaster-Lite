@@ -6,6 +6,18 @@ Its father is VisoMaster-Fusion which has a lot of community based features. Som
 
 This fork will aim to preserve the app in a stricter way to avoid that happening again and will not be eager to implement cutting-edge features, expect no new models that are heavy on VRAM. The focus here is bug fixing and QoL.
 
+---------------
+## 🧩 [EXTENSIONS](https://github.com/gortk/Visomaster-Lite-Extensions-Repo/tree/main)
+
+
+You can install extensions. You can add features to the app while those remain completely optional for the
+userbase, meaning anybody can modify the app, share the extensions to others interested or keep it vanilla and clean.
+
+Head to the repo to send yours or see whats in it. 
+
+
+
+
 
 ---
 
