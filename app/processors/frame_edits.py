@@ -1545,6 +1545,21 @@ class FrameEdits:
         if not parameters.get("FaceShapingEnableToggle", False):
             return img
 
+        # P4-PERF: skip the full grid_sample warp when every slider is at its
+        # neutral value (50). Users often leave shaping on and dial a single
+        # slider; without this the warp still runs every frame.
+        if all(
+            abs(float(parameters.get(f"FaceShaping{s}Slider", 50)) - 50.0) <= 1.0
+            for s in (
+                "FaceSlim",
+                "ChinSlim",
+                "Forehead",
+                "ChinLength",
+                "FaceLength",
+            )
+        ):
+            return img
+
         device = img.device
         C, H, W = img.shape
 

@@ -506,7 +506,7 @@ class IssueScanner:
             prepared_targets.append(
                 (
                     face_id_str,
-                    float(params_pd["SimilarityThresholdSlider"]),
+                    float(params_pd.get("SimilarityThresholdSlider", 0.6)),
                     target_embedding,
                 )
             )
@@ -631,14 +631,6 @@ class IssueScanner:
         target_faces_snapshot: Optional[IssueScanTargetSnapshot] = None,
         control_defaults_snapshot: Optional[dict] = None,
     ) -> Optional[dict]:
-        """
-        The core analytical loop. Runs high-speed sequential detection on specified frame ranges
-        to identify frames where target faces are lost or identification thresholds fail.
-
-        VRAM Management: Explicitly handles torch.Tensor creation and destruction per frame
-        to ensure zero memory leaks over long video scans.
-        """
-        # --- 1. SETUP & VALIDATION ---
         scan_ranges = scan_ranges or self._get_issue_scan_ranges()
         unsupported_reason = self.get_issue_scan_unavailable_reason(
             base_control if base_control is not None else self.main_window.control,
@@ -656,7 +648,6 @@ class IssueScanner:
         if not capture or not capture.isOpened():
             raise RuntimeError("Could not open the selected video for scanning.")
 
-        # Ignore manually dropped frames so we don't flag them as "issues"
         dropped_frames_snapshot = {
             int(frame) for frame in getattr(self.main_window, "dropped_frames", set())
         }
@@ -664,7 +655,6 @@ class IssueScanner:
             scan_ranges, dropped_frames_snapshot
         )
 
-        # Deep copy all control variables to achieve total isolation from UI modifications
         base_control = cast(
             ControlTypes,
             self._filter_scan_control(
@@ -703,9 +693,6 @@ class IssueScanner:
                 IssueScanTargetSnapshot, dict(target_faces_snapshot)
             )
 
-        # Snapshot the current SequentialDetector state.
-        # Since this scanner runs in a background thread, we must not permanently mutate
-        # the user's live tracking state. We will restore these in the 'finally' block.
         previous_last_detected_faces = copy.deepcopy(
             self.sequential_detector.last_detected_faces
         )
@@ -772,7 +759,6 @@ class IssueScanner:
                     "cancelled": cancelled,
                 }
 
-            # --- 2. CORE LOOP ---
             for start_frame, end_frame, local_control, local_params in scan_segments:
                 segment_has_resize_state = any(
                     key in local_control
@@ -796,7 +782,6 @@ class IssueScanner:
                     self._get_issue_scan_bytetrack_config(local_control)
                 )
 
-                # Reset ByteTrack if we switch segments and tracker configuration changes
                 if (
                     current_segment_tracking_enabled
                     and previous_segment_tracking_enabled is False
@@ -820,7 +805,6 @@ class IssueScanner:
                     if is_cancelled and is_cancelled():
                         return build_result(True)
 
-                    # Skip manually dropped frames to save processing time
                     if frame_number in dropped_frames_snapshot:
                         next_frame = frame_number + 1
                         while (
@@ -838,7 +822,6 @@ class IssueScanner:
                         preview_target_height=segment_target_height,
                     )
                     if not ret or not isinstance(frame_bgr, numpy.ndarray):
-                        # Treat unreadable frames as absolute issues for all faces
                         for face_id in issue_frames_by_face:
                             emit_issue(face_id, frame_number)
                         misc_helpers.seek_frame(capture, frame_number + 1)
@@ -847,7 +830,6 @@ class IssueScanner:
                         frame_number += 1
                         continue
 
-                    # Pre-process numpy array for fast PyTorch ingestion
                     frame_rgb = numpy.ascontiguousarray(frame_bgr[..., ::-1])
                     frame_rgb_uint8 = (
                         frame_rgb
@@ -855,23 +837,52 @@ class IssueScanner:
                         else frame_rgb.astype("uint8", copy=False)
                     )
 
-                    # Memory Critical: explicitly allocate tensor on correct target device
                     frame_tensor = (
                         torch.from_numpy(frame_rgb_uint8)
                         .to(self.main_window.models_processor.device, non_blocking=True)
                         .permute(2, 0, 1)
                     )
 
-                    # Trigger the sequential tracker
                     bboxes, kpss_5, _, _ = self.sequential_detector.run(
                         frame_rgb=frame_rgb,
                         local_control_for_worker=local_control,
                         local_params_for_worker=local_params,
                         is_master_edit_active=is_master_edit_snapshot,
-                        frame_tensor=frame_tensor,
+                        frame_tensor=None,
                         detector_control_override=local_control,
                         frame_number=frame_number,
                     )
+
+                    if not (
+                        isinstance(bboxes, numpy.ndarray)
+                        and bboxes.shape[0] > 0
+                        and isinstance(kpss_5, numpy.ndarray)
+                        and kpss_5.shape[0] > 0
+                    ):
+                        bboxes, kpss_5, _ = (
+                            self.main_window.function_worker.run_detect(
+                                frame_tensor,
+                                local_control.get(
+                                    "DetectorModelSelection", "RetinaFace"
+                                ),
+                                max_num=local_control.get(
+                                    "MaxFacesToDetectSlider", 1
+                                ),
+                                score=local_control.get("DetectorScoreSlider", 50)
+                                / 100.0,
+                                input_size=(512, 512),
+                                use_landmark_detection=False,
+                                from_points=local_control.get(
+                                    "DetectFromPointsToggle", False
+                                ),
+                                rotation_angles=[0],
+                                use_mean_eyes=local_control.get(
+                                    "LandmarkMeanEyesToggle", False
+                                ),
+                                control_override=local_control,
+                                bypass_bytetrack=True,
+                            )
+                        )
 
                     detected_embeddings: list[numpy.ndarray] = []
                     if (
@@ -884,7 +895,6 @@ class IssueScanner:
                         recognition_model = match_context["recognition_model"]
                         similarity_type = match_context["similarity_type"]
 
-                        # Generate ArcFace feature vectors for all detected targets in the frame
                         for face_index in range(max_faces):
                             face_kps = kpss_5[face_index]
                             face_bbox = bboxes[face_index]
@@ -906,11 +916,8 @@ class IssueScanner:
                             ):
                                 detected_embeddings.append(face_emb)
 
-                    # --- 3. VRAM CLEANUP ---
-                    # Strictly delete the heavy frame tensor per frame to prevent CUDA Out of Memory errors
                     del frame_tensor
 
-                    # --- 4. IDENTIFICATION MATH ---
                     matched_face_ids: set[str] = set()
                     prepared_targets = match_context["prepared_targets"]
                     for detected_embedding in detected_embeddings:
@@ -920,7 +927,6 @@ class IssueScanner:
                         if best_target_face_id is not None:
                             matched_face_ids.add(best_target_face_id)
 
-                    # Flag issues: if a target was required but not found in 'matched_face_ids', record it
                     for face_id in issue_frames_by_face:
                         if face_id not in matched_face_ids:
                             emit_issue(face_id, frame_number)
@@ -934,9 +940,7 @@ class IssueScanner:
 
             return build_result(False)
 
-        # --- 5. TEARDOWN ---
         finally:
-            # Safely restore the real-time tracking states back to the live UI instance
             self.sequential_detector.last_detected_faces = previous_last_detected_faces
             self.sequential_detector._smoothed_kps = previous_smoothed_kps
             self.sequential_detector._smoothed_dense_kps = previous_smoothed_dense_kps

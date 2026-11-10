@@ -516,11 +516,6 @@ class FaceDetectors:
         control_override: dict | None = None,
         **kwargs: Any,
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-        """
-        Main dispatcher for running face detection. Selects and runs the appropriate model.
-        Supports tracking via 'previous_detections'. Strictly typed to ensure inputs are pre-loaded
-        to the correct device tensor before inference routing.
-        """
         rotation_angles = rotation_angles or [0]
 
         control = (
@@ -529,18 +524,14 @@ class FaceDetectors:
             else self.models_processor.main_window.control
         )
         use_bytetrack = control.get("FaceTrackingEnableToggle", False)
-        # bypass_bytetrack=True disables ByteTrack for this call only (e.g. per-eye VR
-        # detection where the half-width coordinate space would corrupt tracker state)
         if bypass_bytetrack:
             use_bytetrack = False
 
-        # FULL DETECTION FALLBACK
         detector = self.detector_map.get(detect_mode)
         if not detector:
             return np.empty((0, 4)), np.empty((0, 5, 2)), np.empty((0,), dtype=object)
 
         model_name = detector["model_name"]
-        # FD-RACE-01: serialise model switch so concurrent workers don't interleave unload/load.
         with self._ort_model_lock:
             if (
                 self.current_detector_model
@@ -557,11 +548,6 @@ class FaceDetectors:
 
         detection_function = detector["function"]
 
-        # BT-05: when ByteTrack is enabled use a recall-optimised threshold that
-        # respects the user's DetectorScoreSlider (capped at 0.5 so low-confidence
-        # detections still reach the tracker's second-association pass).
-        # Previously this was always hardcoded to 0.3, ignoring user intent and
-        # falling below ByteTracker's own track_thresh (0.4), causing excess FP tracks.
         if use_bytetrack:
             user_score = float(control.get("DetectorScoreSlider", 50)) / 100.0
             effective_score = min(user_score, 0.5)
@@ -582,41 +568,25 @@ class FaceDetectors:
         args.update(kwargs)
 
         if detect_mode in ["RetinaFace", "SCRFD"]:
-            args["input_size"] = (
-                input_size  # Reverted back because some faces are not detected with the auto-resolved size.
-            )
+            args["input_size"] = input_size
 
-        # Run the detector — returns (det, kpss_5, kpss, det_scores)
         det, kpss_5, kpss, det_scores = detection_function(**args)
 
-        # BT-02: guarantee det_scores is always a 1-D array so downstream boolean
-        # indexing and math operations behave consistently (some detectors return (N,1))
         if hasattr(det_scores, "flatten"):
             det_scores = det_scores.flatten()
 
-        # Initialize score_values so it is always bound before the ByteTrack block
-        # (det_scores from detection_function may not be assigned in all paths).
         score_values = np.array([])
 
-        # ByteTrack Advanced Tracking
         if use_bytetrack and BYTETracker is not None:
-            # BT-06/BT-07: serialize all tracker access under a dedicated lock to
-            # prevent concurrent pool workers from corrupting Kalman filter state
             with self._tracker_lock:
                 if self.tracker is None:
                     self.tracker = BYTETracker(_BYTETRACK_ARGS(control))
 
-                # Assert to satisfy static type checkers that tracker is instantiated
                 assert self.tracker is not None
 
-                # Prepare detections for ByteTrack [x1, y1, x2, y2, score]
                 img_hw = (int(img.shape[1]), int(img.shape[2]))
-                # BT-13: measure active tracks BEFORE update so we have the correct
-                # pre-update baseline for scene-cut detection (measuring after update
-                # inflates the count by newly confirmed tracks, making cuts harder to detect)
                 active_before = len(self.tracker.tracked_stracks)
                 if len(det) > 0:
-                    # Use actual detection scores; fall back to 0.9 if lengths mismatch
                     scores_for_tracker = (
                         det_scores
                         if len(det_scores) == len(det)
@@ -629,14 +599,9 @@ class FaceDetectors:
                         np.empty((0, 5)), img_hw, img_hw
                     )
 
-                # BT-13: scene-cut detection — if fewer than 30% of active tracks matched,
-                # the scene has likely changed; reset the tracker to avoid stale Kalman state
                 matched_count = len(online_targets)
                 if active_before > 0 and matched_count / active_before < 0.3:
-                    # print("[ByteTrack] Scene cut detected — resetting tracker")
-                    self.tracker = (
-                        None  # will be re-created with frame_id=0 on next call
-                    )
+                    self.tracker = None
                     with self._track_history_lock:
                         self.track_history.clear()
                     online_targets = []
@@ -650,15 +615,15 @@ class FaceDetectors:
                 self.models_processor, "current_frame_number", 0
             )
 
+            matched_indices: set[int] = set()
+
             for t in online_targets:
                 tlwh = t.tlwh
                 tid = t.track_id
-                # Convert back to [x1, y1, x2, y2]
                 t_bbox = np.array(
                     [tlwh[0], tlwh[1], tlwh[0] + tlwh[2], tlwh[1] + tlwh[3]]
                 )
 
-                # Match landmarks from current detections back to the tracked object via IoU
                 best_iou = 0
                 match_idx = -1
                 for i, d in enumerate(det):
@@ -668,7 +633,7 @@ class FaceDetectors:
                         match_idx = i
 
                 if match_idx != -1:
-                    # Update Cumulative Similarity Score for UI stability
+                    matched_indices.add(match_idx)
                     with self._track_history_lock:
                         if tid in self.track_history:
                             prev_score = self.track_history[tid]["cum_score"]
@@ -678,7 +643,6 @@ class FaceDetectors:
                             )
                         else:
                             cum_score = t.score
-                        # BT-08: record last_seen so stale entries can be evicted
                         self.track_history[tid] = {
                             "cum_score": cum_score,
                             "last_seen": current_frame_num,
@@ -690,19 +654,51 @@ class FaceDetectors:
                     tracked_kpss_all.append(kpss[match_idx])
                     tracked_scores.append(cum_score)
                 else:
-                    # BT-04: coasted track — no matching raw detection; use Kalman-predicted
-                    # position with last known landmarks so brief occlusions are handled
+                    best_iou = 0.0
+                    best_idx = -1
+                    for _i, _d in enumerate(det):
+                        if _i in matched_indices:
+                            continue
+                        _iou = self._calculate_iou(t_bbox, _d)
+                        if _iou > best_iou:
+                            best_iou = _iou
+                            best_idx = _i
+
                     with self._track_history_lock:
                         hist = self.track_history.get(tid)
-                    if hist is not None and hist.get("kps") is not None:
+
+                    if best_idx != -1 and best_iou > 0.05:
+                        matched_indices.add(best_idx)
+                        tracked_det.append(det[best_idx])
+                        tracked_kpss_5.append(kpss_5[best_idx])
+                        tracked_kpss_all.append(kpss[best_idx])
+                        _s = (
+                            float(det_scores[best_idx])
+                            if best_idx < len(det_scores)
+                            else 0.9
+                        )
+                        tracked_scores.append(_s)
+                    elif hist is not None and hist.get("kps") is not None:
                         last_kps = hist["kps"]
                         tracked_det.append(t_bbox)
                         tracked_kpss_5.append(last_kps)
-                        # No dense landmarks available for coasted tracks; reuse 5-pt kps
                         tracked_kpss_all.append(last_kps)
                         tracked_scores.append(hist["cum_score"])
 
-            # BT-08: evict stale track_history entries (last seen > track_buffer frames ago)
+            _unmatched_track_thresh = (
+                control.get("ByteTrackTrackThreshSlider", 40) / 100.0
+            )
+            for _i, _d in enumerate(det):
+                if _i in matched_indices:
+                    continue
+                _score_i = float(det_scores[_i]) if _i < len(det_scores) else 0.9
+                if _score_i < _unmatched_track_thresh:
+                    continue
+                tracked_det.append(_d)
+                tracked_kpss_5.append(kpss_5[_i])
+                tracked_kpss_all.append(kpss[_i])
+                tracked_scores.append(_score_i)
+
             track_buffer = int(control.get("ByteTrackTrackBufferSlider", 30))
             with self._track_history_lock:
                 stale_ids = [
@@ -713,36 +709,26 @@ class FaceDetectors:
                 for tid in stale_ids:
                     del self.track_history[tid]
 
-            # Ensure numerical types for math operations
             if tracked_det:
                 det = np.array(tracked_det, dtype=np.float32)
                 kpss_5 = np.array(tracked_kpss_5, dtype=np.float32)
-                # Dense landmarks 'kpss' can remain object if shapes vary,
-                # but refine_landmarks logic handles it
                 kpss = np.array(tracked_kpss_all, dtype=object)
                 score_values = np.array(tracked_scores, dtype=np.float32).flatten()
             else:
-                # BT-12 / BT-14: no confirmed tracks yet (first frame, scene cut, or
-                # tracker reset after seek).  Fall back to raw detector output so that
-                # swap/edit is applied immediately instead of waiting for ByteTrack to
-                # confirm tracks on a subsequent frame.
                 if len(det) > 0:
                     score_values = (
                         det_scores
                         if len(det_scores) == len(det)
                         else np.full(len(det), 0.9, dtype=np.float32)
                     )
-                    # det, kpss_5, kpss already hold the raw detector output — keep them
                 else:
                     det = np.empty((0, 4), dtype=np.float32)
                     kpss_5 = np.empty((0, 5, 2), dtype=np.float32)
                     kpss = np.empty((0,), dtype=object)
                     score_values = np.empty((0,), dtype=np.float32)
 
-        # Optionally refine landmarks (if the user wants detailed landmarks)
         bytetrack_active = use_bytetrack and BYTETracker is not None
         if use_landmark_detection and len(det) > 0:
-            # Use tracked scores when ByteTrack is active, otherwise actual detector scores
             current_scores = score_values if bytetrack_active else det_scores
 
             det_r, kpss_5_r, kpss_r, _ = self._refine_landmarks(

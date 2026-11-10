@@ -31,6 +31,23 @@ class TimelineSeekSlider(QtWidgets.QSlider):
         self._cached_baseline_ctrl = {}
         self._connected_widgets = set()
 
+        # P7-PERF: cache QPen / QColor / QFont so paintEvent (fired ~30x/sec
+        # during playback) does not allocate them on every redraw.
+        self._pen_gray = QtGui.QPen(QtGui.QColor("gray"), 3)
+        self._pen_segment_a = QtGui.QPen(QtGui.QColor("#7e57c2"), 3)
+        self._pen_segment_b = QtGui.QPen(QtGui.QColor("#42a5f5"), 3)
+        self._pen_provisional = QtGui.QPen(QtGui.QColor("#e5c07b"), 3)
+        self._pen_issue = QtGui.QPen(QtGui.QColor("#ff9800"), 3)
+        self._pen_issue.setCapStyle(QtCore.Qt.PenCapStyle.SquareCap)
+        self._pen_dropped = QtGui.QPen(QtGui.QColor("#e8483c"), 3)
+        self._pen_bracket_start = QtGui.QPen(QtGui.QColor("#4CAF50"), 1)
+        self._pen_bracket_end = QtGui.QPen(QtGui.QColor("#e8483c"), 1)
+        self._pen_playhead_normal = QtGui.QPen(QtGui.QColor("white"), 1)
+        self._pen_playhead_provisional = QtGui.QPen(QtGui.QColor("#e5c07b"), 1)
+        self._brush_playhead_normal = QtGui.QBrush(QtGui.QColor("white"))
+        self._brush_playhead_provisional = QtGui.QBrush(QtGui.QColor("#e5c07b"))
+        self._bracket_font = QtGui.QFont("Arial", 16, QtGui.QFont.Bold)
+
     def setup(self, main_window: "MainWindow"):
         """Injects the main window dependency after UI creation."""
         self.main_window = main_window
@@ -278,15 +295,12 @@ class TimelineSeekSlider(QtWidgets.QSlider):
         has_provisional_changes = self._last_provisional_state
 
         # 1. Base Alternating Segments
-        painter.setPen(QtGui.QPen(QtGui.QColor("gray"), 3))
+        painter.setPen(self._pen_gray)
         if not self.markers_sorted:
             painter.drawLine(groove_start, groove_y, groove_end, groove_y)
         else:
             first_marker_x = marker_x_for_value(self.markers_sorted[0])
             painter.drawLine(groove_start, groove_y, int(first_marker_x), groove_y)
-
-            color_a = QtGui.QColor("#7e57c2")
-            color_b = QtGui.QColor("#42a5f5")
 
             for i in range(len(self.markers_sorted)):
                 start_val = self.markers_sorted[i]
@@ -298,8 +312,9 @@ class TimelineSeekSlider(QtWidgets.QSlider):
                 start_x = marker_x_for_value(start_val)
                 end_x = marker_x_for_value(end_val)
 
-                current_color = color_a if i % 2 == 0 else color_b
-                painter.setPen(QtGui.QPen(current_color, 3))
+                painter.setPen(
+                    self._pen_segment_a if i % 2 == 0 else self._pen_segment_b
+                )
                 painter.drawLine(int(start_x), groove_y, int(end_x), groove_y)
                 painter.drawLine(
                     int(start_x), groove_rect.top(), int(start_x), groove_rect.bottom()
@@ -317,14 +332,12 @@ class TimelineSeekSlider(QtWidgets.QSlider):
 
             start_x = marker_x_for_value(provisional_start_val)
             end_x = marker_x_for_value(provisional_end_val)
-            painter.setPen(QtGui.QPen(QtGui.QColor("#e5c07b"), 3))
+            painter.setPen(self._pen_provisional)
             painter.drawLine(int(start_x), groove_y, int(end_x), groove_y)
 
         # 3. Issue markers
         if self.issue_markers:
-            issue_pen = QtGui.QPen(QtGui.QColor("#ff9800"), 3)
-            issue_pen.setCapStyle(QtCore.Qt.PenCapStyle.SquareCap)
-            painter.setPen(issue_pen)
+            painter.setPen(self._pen_issue)
             issue_top = groove_y - 2
             issue_bottom = groove_y + 2
             for value in self.issue_markers_sorted:
@@ -335,7 +348,7 @@ class TimelineSeekSlider(QtWidgets.QSlider):
 
         # 4. Dropped markers
         if self.dropped_markers:
-            painter.setPen(QtGui.QPen(QtGui.QColor("#e8483c"), 3))
+            painter.setPen(self._pen_dropped)
             for value in self.dropped_markers_sorted:
                 marker_x = marker_x_for_value(value)
                 painter.drawLine(
@@ -346,17 +359,16 @@ class TimelineSeekSlider(QtWidgets.QSlider):
                 )
 
         # 5. Playhead Handle
-        handle_color = (
-            QtGui.QColor("#e5c07b")
-            if has_provisional_changes
-            else QtGui.QColor("white")
-        )
-        painter.setPen(QtGui.QPen(handle_color, 1))
-        painter.setBrush(QtGui.QBrush(handle_color))
+        if has_provisional_changes:
+            painter.setPen(self._pen_playhead_provisional)
+            painter.setBrush(self._brush_playhead_provisional)
+        else:
+            painter.setPen(self._pen_playhead_normal)
+            painter.setBrush(self._brush_playhead_normal)
         painter.drawRect(handle_rect)
 
         # 6. Job Start/End Brackets
-        painter.setFont(QtGui.QFont("Arial", 16, QtGui.QFont.Bold))
+        painter.setFont(self._bracket_font)
         font_metrics = painter.fontMetrics()
 
         # Calculate exactly how much space the bracket needs
@@ -373,7 +385,7 @@ class TimelineSeekSlider(QtWidgets.QSlider):
                 rect = QtCore.QRect(
                     int(start_x - 6), bracket_top_y, bracket_width, bracket_height
                 )
-                painter.setPen(QtGui.QPen(QtGui.QColor("#4CAF50"), 1))
+                painter.setPen(self._pen_bracket_start)
                 painter.drawText(rect, QtCore.Qt.AlignmentFlag.AlignCenter, "[")
 
             if end_frame is not None:
@@ -382,7 +394,7 @@ class TimelineSeekSlider(QtWidgets.QSlider):
                 rect = QtCore.QRect(
                     int(end_x - 6), bracket_top_y, bracket_width, bracket_height
                 )
-                painter.setPen(QtGui.QPen(QtGui.QColor("#e8483c"), 1))
+                painter.setPen(self._pen_bracket_end)
                 painter.drawText(rect, QtCore.Qt.AlignmentFlag.AlignCenter, "]")
 
 

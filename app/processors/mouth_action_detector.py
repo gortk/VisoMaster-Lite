@@ -62,30 +62,62 @@ class MouthActionDetector:
         self._classes_name: Optional[str] = None
         self._infer_lock = threading.Lock()
         self._load_error: Optional[str] = None
+        self._load_started = False
+        self._load_thread: Optional[threading.Thread] = None
+        self._loading_ui_owner = None
 
-    # ------------------------------------------------------------------
     @classmethod
     def get(cls) -> "MouthActionDetector":
-        """Return the shared singleton, creating and loading it on first call."""
         if cls._instance is None:
             with cls._class_lock:
                 if cls._instance is None:
-                    inst = cls()
-                    inst._lazy_load()
-                    cls._instance = inst
+                    cls._instance = cls()
         return cls._instance
+ 
+    @classmethod
+    def ensure_loaded_async(
+        cls, main_window=None
+    ) -> "MouthActionDetector":
+        inst = cls.get()
+        with cls._class_lock:
+            if inst._load_started or inst._session is not None:
+                return inst
+            inst._load_started = True
+            inst._loading_ui_owner = main_window
+            if main_window is not None:
+                main_window.model_loading_signal.emit()
 
-    # ------------------------------------------------------------------
+            def _worker():
+                try:
+                    inst._lazy_load()
+                except Exception as exc:
+                    inst._load_error = f"Failed to load mouth action model: {exc}"
+                    logger.warning(inst._load_error)
+                finally:
+                    owner = inst._loading_ui_owner
+                    inst._loading_ui_owner = None
+                    if owner is not None:
+                        owner.model_loaded_signal.emit()
+
+            thread = threading.Thread(
+                target=_worker, daemon=True, name="MouthActionDetectorLoader"
+            )
+            inst._load_thread = thread
+            thread.start()
+        return inst
+
+ 
     @staticmethod
     def _providers() -> list[Any]:
-        """Return the best available ONNX Runtime provider list."""
         try:
             import onnxruntime as ort
         except ImportError:
             return []
 
         available = set(ort.get_available_providers())
-        requested = os.environ.get("VISOMASTER_MOUTH_ACTION_PROVIDER", "").strip()
+        if "CPUExecutionProvider" in available:
+            return ["CPUExecutionProvider"]
+        return []
 
         def _fallbacks() -> list[Any]:
             providers: list[Any] = []
@@ -195,8 +227,11 @@ class MouthActionDetector:
             if inst._session is not None:
                 try:
                     inst._session.close()
-                except Exception as exc:  # noqa: BLE001
+                except Exception as exc:
                     logger.debug("Error closing mouth action detector session: %s", exc)
+            inst._load_started = False
+            inst._load_thread = None
+            inst._loading_ui_owner = None
             inst._session = None
             inst._input_name = None
             inst._boxes_name = None

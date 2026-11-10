@@ -11,40 +11,6 @@ if TYPE_CHECKING:
     from app.ui.main_ui import MainWindow
 
 
-def _set_value_blocking_signals(
-    source_widget: QtWidgets.QSlider | QtWidgets.QSpinBox,
-    dest_widget: QtWidgets.QSlider | QtWidgets.QSpinBox,
-    value,
-) -> None:
-    """Mirror a value between a slider and its spin box without ping-ponging."""
-    with QtCore.QSignalBlocker(source_widget):
-        with QtCore.QSignalBlocker(dest_widget):
-            dest_widget.setValue(value)
-
-
-def _set_layout_widgets_visible(layout: QtWidgets.QLayout, checked: bool) -> None:
-    for i in range(layout.count()):
-        item = layout.itemAt(i)
-        if item is None:
-            continue
-        if widget := item.widget():
-            widget.setVisible(checked)
-        elif child_layout := item.layout():
-            _set_layout_widgets_visible(child_layout, checked)
-
-
-def toggle_target_video_filters_sorting(main_window: "MainWindow") -> None:
-    checked = main_window.targetVideosFilterMenuButton.isChecked()
-    _set_layout_widgets_visible(main_window.horizontalLayout_9a, checked)
-    _set_layout_widgets_visible(main_window.horizontalLayout_9b_gridLayout_3, checked)
-    filter_actions.filter_target_videos(main_window)
-
-    main_window.input_Target_DockWidget.setMinimumWidth(0)
-    content = main_window.input_Target_DockWidget.widget()
-    if content:
-        content.setMinimumWidth(0)
-
-
 def current_sort_needs_metadata(main_window: "MainWindow") -> bool:
     sort_mode = main_window.targetVideosSortComboBox.currentData()
     return sort_mode in {
@@ -55,18 +21,8 @@ def current_sort_needs_metadata(main_window: "MainWindow") -> bool:
 
 
 def sort_target_videos(main_window: "MainWindow", *args, **kwargs) -> None:
-    """Re-apply the current filters and sort order to the target media list."""
     list_widget = main_window.targetVideosList
-
-    # Minimum image dimensions to keep an item visible.
-    width = main_window.targetVideosWidthSlider.value() or 0
-    height = main_window.targetVideosHeightSlider.value() or 0
-    min_dimension = (
-        sortable_widgets.SortableImageDimension(width, height)
-        if (width or height)
-        else None
-    )
-    list_widget.setMinImageDimension(min_dimension)
+    list_widget.setMinImageDimension(None)
 
     sort_order = (
         QtCore.Qt.SortOrder.DescendingOrder
@@ -75,7 +31,6 @@ def sort_target_videos(main_window: "MainWindow", *args, **kwargs) -> None:
     )
     list_widget.setSortingMode(main_window.targetVideosSortComboBox.currentData())
 
-    # Filter first so sorting only has to order the items that stay visible.
     filter_actions.filter_target_videos(main_window)
     list_widget.sortItems(sort_order)
 
@@ -88,17 +43,14 @@ def sort_target_videos(main_window: "MainWindow", *args, **kwargs) -> None:
         )
 
 
-# --- Ctrl + mouse wheel: zoom the target media thumbnails -------------------
-_THUMB_PX_PER_NOTCH = 8  # one wheel notch = 120 angle-delta units
+_THUMB_PX_PER_NOTCH = 8
 
 
 class _ThumbnailZoomFilter(QtCore.QObject):
-    """Turns Ctrl + wheel over the target media list into thumbnail zoom."""
-
     def __init__(self, main_window: "MainWindow"):
         super().__init__(main_window)
         self._main_window = main_window
-        self._size_f: float | None = None  # fractional size for smooth wheels
+        self._size_f: float | None = None
 
     def eventFilter(self, watched, event):
         if not (
@@ -126,11 +78,10 @@ class _ThumbnailZoomFilter(QtCore.QObject):
             if new_side != current:
                 list_view_actions.apply_target_thumbnail_size(mw, (new_side, new_side))
         event.accept()
-        return True  # swallow it so the list does not also scroll
+        return True
 
 
 def install_target_thumbnail_zoom(main_window: "MainWindow") -> None:
-    """Enable Ctrl+wheel thumbnail zoom on the target media list (call once)."""
     if getattr(main_window, "_target_thumb_zoom_installed", False):
         return
     zoom_filter = _ThumbnailZoomFilter(main_window)

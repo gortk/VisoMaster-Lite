@@ -108,7 +108,6 @@ class MediaPipeline(QObject):
         # --- Buffers ---
         # Changed to store ONLY numpy arrays to prevent VRAM memory bloat
         self.frames_to_display: Dict[int, numpy.ndarray] = {}
-        self.webcam_frames_to_display: queue.Queue[numpy.ndarray] = queue.Queue()
         self.max_frames_to_display_size: int = 8
         self._wrap_frame_target: int = -1  # Used to synchronize seamless looping
 
@@ -260,53 +259,31 @@ class MediaPipeline(QObject):
                     arr: numpy.ndarray = self.frames_to_display.pop(oldest)
                     del arr
 
-    def store_webcam_frame_to_display(self, frame: numpy.ndarray) -> None:
-        """Stores a processed webcam frame. Overwrites stale frames so the UI is always real-time."""
-        while not self.webcam_frames_to_display.empty():
-            try:
-                stale_frame = self.webcam_frames_to_display.get_nowait()
-                del stale_frame
-            except queue.Empty:
-                break
-
-        self.webcam_frames_to_display.put(frame)
-
-    # --- PRODUCER (FEEDER THREAD) ---
-
     def start_feeder(self, mode: str, recording: bool) -> None:
         """Initializes and starts the feeder background thread(s)."""
         print(
             f"[INFO] Starting feeder pipeline (Mode: {mode}, Recording: {recording})..."
         )
 
-        if self.vp.file_type == "webcam":
-            # Single stage for real-time webcam (I/O bound to sensor framerate)
-            self.feeder_thread = threading.Thread(target=self._feed_webcam, daemon=True)
-            self.feeder_thread.start()
-        else:
-            # Decoupled 2-stage pipeline for video/segments
+        # --- DYNAMIC RAW QUEUE SIZING (RAM OPTIMIZED) ---
+        dynamic_raw_queue_size: int = max(5, self.vp.num_threads // 2)
 
-            # --- DYNAMIC RAW QUEUE SIZING (RAM OPTIMIZED) ---
-            dynamic_raw_queue_size: int = max(5, self.vp.num_threads // 2)
+        # Safely reset the intermediate queue AND update its maxsize in-place
+        # This prevents reference-bleeding because we never destroy the original queue object.
+        with self.raw_frame_queue.mutex:
+            self.raw_frame_queue.queue.clear()
+            self.raw_frame_queue.maxsize = dynamic_raw_queue_size
 
-            # Safely reset the intermediate queue AND update its maxsize in-place
-            # This prevents reference-bleeding because we never destroy the original queue object.
-            with self.raw_frame_queue.mutex:
-                self.raw_frame_queue.queue.clear()
-                self.raw_frame_queue.maxsize = dynamic_raw_queue_size
+            # Unblock any stale threads that might have been waiting during a previous run
+            self.raw_frame_queue.not_empty.notify_all()
+            self.raw_frame_queue.not_full.notify_all()
+            self.raw_frame_queue.all_tasks_done.notify_all()
 
-                # Unblock any stale threads that might have been waiting during a previous run
-                self.raw_frame_queue.not_empty.notify_all()
-                self.raw_frame_queue.not_full.notify_all()
-                self.raw_frame_queue.all_tasks_done.notify_all()
+        self.detector_thread = threading.Thread(target=self._detector_loop, daemon=True)
+        self.detector_thread.start()
 
-            self.detector_thread = threading.Thread(
-                target=self._detector_loop, daemon=True
-            )
-            self.detector_thread.start()
-
-            self.feeder_thread = threading.Thread(target=self._decode_loop, daemon=True)
-            self.feeder_thread.start()
+        self.feeder_thread = threading.Thread(target=self._decode_loop, daemon=True)
+        self.feeder_thread.start()
 
     def _decode_loop(self) -> None:
         """
@@ -760,8 +737,10 @@ class MediaPipeline(QObject):
                         self.ui_state_is_dirty = False
                         print("[INFO] Global State changed : Dirty flag cleared")
 
-                    local_params_for_worker = fast_state_copy(self._cached_params)
-                    local_control_for_worker = fast_state_copy(self._cached_control)
+                    # P8-PERF: _cached_params is already a frozen snapshot. The
+                    # old code ran fast_state_copy on it and then immediately
+                    # threw the result away, replacing it with the per-face loop
+                    # below. Skip that redundant full-dict copy.
                     local_params_for_worker = cast(FacesParametersTypes, {})
 
                     if self._cached_params is not None:
@@ -772,6 +751,8 @@ class MediaPipeline(QObject):
                                 )
                             else:
                                 local_params_for_worker[face_id] = face_data
+
+                    local_control_for_worker = fast_state_copy(self._cached_control)
 
                 frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
 
@@ -784,7 +765,12 @@ class MediaPipeline(QObject):
                 ):
                     self.vp._video_had_targets = True
                     is_master_edit_active = self.main_window.editFacesButton.isChecked()
-                    bboxes, kpss_5, kpss, kpss_203 = self.vp.sequential_detector.run(
+                    (
+                        bboxes,
+                        kpss_5,
+                        kpss,
+                        kpss_203,
+                    ) = self.vp.sequential_detector.run(
                         frame_rgb=frame_rgb,
                         local_control_for_worker=local_control_for_worker,
                         local_params_for_worker=local_params_for_worker,
@@ -855,125 +841,6 @@ class MediaPipeline(QObject):
             del detector_stream
 
         print("[INFO] Detector Thread finished.")
-
-    def _feed_webcam(self) -> None:
-        """Continuous extraction loop for Live Webcam hardware."""
-        self.ui_state_is_dirty = True
-        while self.vp.processing:
-            try:
-                in_flight_frames = (
-                    len(self.webcam_frames_to_display.queue)
-                    + self.vp.frame_queue.qsize()
-                )
-                if in_flight_frames >= self.vp.max_display_buffer_size:
-                    time.sleep(0.02)  # Increased to 20ms to drop CPU spin usage
-                    continue
-
-                ret, frame_bgr = misc_helpers.read_frame(
-                    self.vp.media_capture, 0, preview_target_height=None
-                )
-
-                # Explicit Mypy guard for frame_bgr
-                if not ret or frame_bgr is None:
-                    print("[WARN] Feeder: Failed to read webcam frame.")
-                    continue
-
-                # --- ZERO-COPY PINNED RING BUFFER (BGR -> RGB) ---
-                current_shape = frame_bgr.shape
-                if (
-                    not hasattr(self, "_webcam_pinned_ring_buffer")
-                    or getattr(self, "_webcam_pinned_ring_shape", None) != current_shape
-                ):
-                    self._webcam_pinned_ring_shape = current_shape
-                    buffer_count = self.vp.max_display_buffer_size + 5
-                    self._webcam_pinned_ring_buffer = []
-                    is_cuda = torch.cuda.is_available()
-                    for _ in range(buffer_count):
-                        if is_cuda:
-                            t = torch.empty(
-                                current_shape, dtype=torch.uint8
-                            ).pin_memory()
-                            self._webcam_pinned_ring_buffer.append(t.numpy())
-                        else:
-                            self._webcam_pinned_ring_buffer.append(
-                                numpy.empty(current_shape, dtype=numpy.uint8)
-                            )
-                    self._webcam_pinned_ring_idx = 0
-                    print(
-                        f"[INFO] Webcam: Initialized Zero-Copy RGB Ring Buffer for shape {current_shape} ({buffer_count} frames)"
-                    )
-
-                pinned_dst = self._webcam_pinned_ring_buffer[
-                    self._webcam_pinned_ring_idx
-                ]
-                self._webcam_pinned_ring_idx = (self._webcam_pinned_ring_idx + 1) % len(
-                    self._webcam_pinned_ring_buffer
-                )
-
-                cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB, dst=pinned_dst)
-                frame_rgb = pinned_dst
-
-                with self.main_window.models_processor.model_lock:
-                    if getattr(self, "ui_state_is_dirty", True) or not hasattr(
-                        self, "_webcam_cached_params"
-                    ):
-                        self._webcam_cached_params = fast_state_copy(
-                            self.main_window.parameters
-                        )
-                        self._webcam_cached_control = fast_state_copy(
-                            self.main_window.control
-                        )
-                        self.ui_state_is_dirty = False
-                        print("[INFO] Global State changed : Dirty flag cleared")
-
-                    local_params_for_worker = fast_state_copy(
-                        self._webcam_cached_params
-                    )
-                    local_control_for_worker = fast_state_copy(
-                        self._webcam_cached_control
-                    )
-
-                # 5. Sequential Detection Check
-                is_swap_active = self.main_window.swapfacesButton.isChecked()
-                is_edit_active = self.main_window.editFacesButton.isChecked()
-
-                if len(self.main_window.target_faces) > 0 and (
-                    is_swap_active or is_edit_active
-                ):
-                    self.vp._webcam_had_targets = True
-                    is_master_edit_active = self.main_window.editFacesButton.isChecked()
-                    bboxes, kpss_5, kpss, kpss_203 = self.vp.sequential_detector.run(
-                        frame_rgb=frame_rgb,
-                        local_control_for_worker=local_control_for_worker,
-                        local_params_for_worker=local_params_for_worker,
-                        is_master_edit_active=is_master_edit_active,
-                        frame_number=0,
-                    )
-                else:
-                    bboxes = numpy.empty((0, 4), dtype=numpy.float32)
-                    kpss_5 = numpy.empty((0, 5, 2), dtype=numpy.float32)
-                    kpss = numpy.empty((0, 68, 2), dtype=numpy.float32)
-                    kpss_203 = numpy.empty((0, 203, 2), dtype=numpy.float32)
-
-                    if self.vp._webcam_had_targets:
-                        self.vp.sequential_detector.reset_state()
-                        self.vp._webcam_had_targets = False
-
-                task = (
-                    0,
-                    frame_rgb,
-                    local_params_for_worker,
-                    local_control_for_worker,
-                    bboxes,
-                    kpss_5,
-                    kpss,
-                    kpss_203,
-                )
-                self.vp.frame_queue.put(task)
-
-            except Exception as e:
-                print(f"[ERROR] Error in _feed_webcam loop: {e}")
-                self.vp.processing = False
 
     # --- CONSUMER (METRONOME) ---
 
@@ -1267,54 +1134,49 @@ class MediaPipeline(QObject):
         frame = None
         frame_number_to_display = 0
 
-        if self.vp.file_type == "webcam":
-            if self.webcam_frames_to_display.empty():
+        draining_tail = self.is_draining_tail()
+        frame_number_to_display = self.vp.next_frame_to_display
+        if (
+            draining_tail
+            and self.frames_to_display
+            and frame_number_to_display not in self.frames_to_display
+            and (
+                self.vp._safe_unfinished_tasks() == 0
+                or self.vp.tail_force_finalize_due_to_stall
+            )
+        ):
+            # The next frame will not come (lost or skipped): flush what is
+            # left. While a worker may still deliver it, wait for it instead,
+            # or a late frame would be written after the ones that follow it.
+            frame_number_to_display = min(self.frames_to_display)
+
+        original_frame = frame_number_to_display
+        while (
+            frame_number_to_display in self.skipped_frames
+            and frame_number_to_display <= self.vp.max_frame_number
+        ):
+            frame_number_to_display += 1
+
+        if frame_number_to_display > original_frame:
+            skipped_count = frame_number_to_display - original_frame
+            print(
+                f"[INFO] Display: Advancing past {skipped_count} skipped frame(s), jumping to frame {frame_number_to_display}"
+            )
+            self.vp.next_frame_to_display = frame_number_to_display
+
+        if frame_number_to_display not in self.frames_to_display:
+            if draining_tail:
+                if self._handle_tail_drain_wait(frame_number_to_display):
+                    return
+            elif self._abort_if_pipeline_cannot_produce_frame(
+                frame_number_to_display
+            ):
                 return
-            frame = self.webcam_frames_to_display.get()
-        else:
-            draining_tail = self.is_draining_tail()
-            frame_number_to_display = self.vp.next_frame_to_display
-            if (
-                draining_tail
-                and self.frames_to_display
-                and frame_number_to_display not in self.frames_to_display
-                and (
-                    self.vp._safe_unfinished_tasks() == 0
-                    or self.vp.tail_force_finalize_due_to_stall
-                )
-            ):
-                # The next frame will not come (lost or skipped): flush what is
-                # left. While a worker may still deliver it, wait for it instead,
-                # or a late frame would be written after the ones that follow it.
-                frame_number_to_display = min(self.frames_to_display)
+            else:
+                return
 
-            original_frame = frame_number_to_display
-            while (
-                frame_number_to_display in self.skipped_frames
-                and frame_number_to_display <= self.vp.max_frame_number
-            ):
-                frame_number_to_display += 1
-
-            if frame_number_to_display > original_frame:
-                skipped_count = frame_number_to_display - original_frame
-                print(
-                    f"[INFO] Display: Advancing past {skipped_count} skipped frame(s), jumping to frame {frame_number_to_display}"
-                )
-                self.vp.next_frame_to_display = frame_number_to_display
-
-            if frame_number_to_display not in self.frames_to_display:
-                if draining_tail:
-                    if self._handle_tail_drain_wait(frame_number_to_display):
-                        return
-                elif self._abort_if_pipeline_cannot_produce_frame(
-                    frame_number_to_display
-                ):
-                    return
-                else:
-                    return
-
-            frame = self.frames_to_display.pop(frame_number_to_display)
-            self.vp.tail_pending_stall_start_sec = 0.0
+        frame = self.frames_to_display.pop(frame_number_to_display)
+        self.vp.tail_pending_stall_start_sec = 0.0
 
         # 3. Output to System (UI, Encoder, VirtualCam)
         self.vp.current_frame = frame
@@ -1323,11 +1185,10 @@ class MediaPipeline(QObject):
         if hasattr(self, "absolute_frames_processed"):
             self.absolute_frames_processed += 1
 
-        if self.vp.file_type != "webcam":
-            self.heartbeat_frame_counter += 1
-            if self.heartbeat_frame_counter >= 500:
-                self.heartbeat_frame_counter = 0
-                self.vp.processing_heartbeat_signal.emit()
+        self.heartbeat_frame_counter += 1
+        if self.heartbeat_frame_counter >= 500:
+            self.heartbeat_frame_counter = 0
+            self.vp.processing_heartbeat_signal.emit()
 
         self.vp.send_frame_to_virtualcam(frame)
 
@@ -1355,15 +1216,14 @@ class MediaPipeline(QObject):
                     f"[WARN] FFmpeg encoder not available for {log_prefix} when trying to write frame {frame_number_to_display}."
                 )
 
-        if self.vp.file_type != "webcam":
-            if frame_number_to_display in self.main_window.markers:
-                with self.main_window.models_processor.model_lock:
-                    video_control_actions.update_parameters_and_control_from_marker(
-                        self.main_window, frame_number_to_display
-                    )
-                    video_control_actions.update_widget_values_from_markers(
-                        self.main_window, frame_number_to_display
-                    )
+        if frame_number_to_display in self.main_window.markers:
+            with self.main_window.models_processor.model_lock:
+                video_control_actions.update_parameters_and_control_from_marker(
+                    self.main_window, frame_number_to_display
+                )
+                video_control_actions.update_widget_values_from_markers(
+                    self.main_window, frame_number_to_display
+                )
 
         # CREATE QPIXMAP JUST-IN-TIME (GUI Thread safety)
         pixmap = common_widget_actions.get_pixmap_from_frame(self.main_window, frame)
@@ -1386,33 +1246,33 @@ class MediaPipeline(QObject):
         self.main_window.models_processor.check_deferred_unloads(
             frame_number_to_display
         )
-        if self.vp.file_type != "webcam":
-            jump_occurred = False
-            if (
-                hasattr(self, "segment_jumps")
-                and frame_number_to_display in self.segment_jumps
-            ):
-                next_f = self.segment_jumps.pop(frame_number_to_display)
-                with self.state_lock:
-                    self.vp.next_frame_to_display = next_f
-                    if self._wrap_frame_target == frame_number_to_display:
-                        self._wrap_frame_target = -1
-                jump_occurred = True
 
-                print(f"[INFO] Metronome: Executing segment jump to frame {next_f}.")
-                self.main_window.videoSeekSlider.blockSignals(True)
-                self.main_window.videoSeekSlider.setValue(next_f)
-                self.main_window.videoSeekSlider.blockSignals(False)
+        jump_occurred = False
+        if (
+            hasattr(self, "segment_jumps")
+            and frame_number_to_display in self.segment_jumps
+        ):
+            next_f = self.segment_jumps.pop(frame_number_to_display)
+            with self.state_lock:
+                self.vp.next_frame_to_display = next_f
+                if self._wrap_frame_target == frame_number_to_display:
+                    self._wrap_frame_target = -1
+            jump_occurred = True
 
-                self.stop_live_sound()
-                # The feeder continues from the exact segment boundary; do
-                # not reuse an earlier keyframe selected for initial playback.
-                self.live_sound_seek_time = None
-                if self.main_window.liveSoundButton.isChecked():
-                    self.start_live_sound()
+            print(f"[INFO] Metronome: Executing segment jump to frame {next_f}.")
+            self.main_window.videoSeekSlider.blockSignals(True)
+            self.main_window.videoSeekSlider.setValue(next_f)
+            self.main_window.videoSeekSlider.blockSignals(False)
 
-            if not jump_occurred:
-                self.vp.next_frame_to_display += 1
+            self.stop_live_sound()
+            # The feeder continues from the exact segment boundary; do
+            # not reuse an earlier keyframe selected for initial playback.
+            self.live_sound_seek_time = None
+            if self.main_window.liveSoundButton.isChecked():
+                self.start_live_sound()
+
+        if not jump_occurred:
+            self.vp.next_frame_to_display += 1
 
     # --- AUDIO SYNCHRONIZATION ---
     def resolve_live_preview_start(

@@ -614,9 +614,13 @@ def select_target_medias(
 ):
     from app.ui.widgets.actions import video_control_actions
 
-    if video_control_actions.block_if_issue_scan_active(
-        main_window, "change target media"
-    ):
+    # Auto-watch timers fire on their own (800 ms normal / 3000 ms recursive).
+    # Showing a "Cannot auto-load target media" toast on each tick spams the
+    # user for something they never initiated, so defer silently instead.
+    if video_control_actions.is_issue_scan_active(main_window):
+        timer = getattr(main_window, "_target_folder_watch_timer", None)
+        if timer is not None:
+            timer.start()
         return
 
     files_list = files_list or []
@@ -1543,9 +1547,12 @@ def scan_and_append_new_target_media(main_window: "MainWindow"):
     import app.helpers.miscellaneous as misc_helpers
     from app.ui.widgets import ui_workers
 
-    if video_control_actions.block_if_issue_scan_active(
-        main_window, "auto-load target media"
-    ):
+    # Auto-watch timers fire on their own (800 ms normal / 3000 ms recursive).
+    # Do not restart them here — the scan-start hook already stopped them, and
+    # _restore_issue_scan_ui re-registers them once the scan finishes. Firing
+    # block_if_issue_scan_active on every tick spams the user with a toast for
+    # something they never initiated.
+    if video_control_actions.is_issue_scan_active(main_window):
         return
 
     if not getattr(main_window, "_workspace_load_done", True):

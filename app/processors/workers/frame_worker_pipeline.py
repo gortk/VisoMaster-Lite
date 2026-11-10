@@ -3,7 +3,7 @@ import re
 from math import ceil
 from collections import OrderedDict, deque
 from typing import TYPE_CHECKING, Any, cast
-
+import threading
 import numpy as np
 import skimage.transform as trans
 import torch
@@ -20,6 +20,11 @@ if TYPE_CHECKING:
     # Forward reference to the main FrameWorker orchestrator
     from .frame_worker import FrameWorker
 
+_COLOR_EMA_LOCK = threading.Lock()
+_COLOR_STATS_EMA: OrderedDict[bytes, dict[str, torch.Tensor]] = OrderedDict()
+_COLOR_STATS_EMA_MAX: int = 32
+_COLOR_EMA_ALPHA: float = 0.15
+
 
 class PipelineProcessor:
     """
@@ -30,20 +35,11 @@ class PipelineProcessor:
     def __init__(self, worker: "FrameWorker"):
         self.worker = worker
 
-        # Q-QUAL-03: EMA alpha for AutoColor reference statistics
-        self._COLOR_EMA_ALPHA: float = 0.30
-
         # FW-MEM-01: Gabor kernel cache as strictly typed LRU-bounded OrderedDict
         self._gabor_kernels_expanded_cache: OrderedDict[tuple, torch.Tensor] = (
             OrderedDict()
         )
         self._gabor_kernels_cache: OrderedDict[tuple, torch.Tensor] = OrderedDict()
-
-        # Q-QUAL-03: EMA over per-face AutoColor reference statistics to reduce flicker.
-        self._color_stats_ema: OrderedDict[bytes, dict[str, torch.Tensor]] = (
-            OrderedDict()
-        )
-        self._COLOR_STATS_EMA_MAX: int = 32
 
         # OPTIMIZATION: Cached Convolution Kernels (VRAM)
         self._kernel_lap: torch.Tensor | None = None
@@ -1489,7 +1485,7 @@ class PipelineProcessor:
         """
         from app.processors.mouth_action_detector import MouthActionDetector
 
-        detector = MouthActionDetector.get()
+        detector = MouthActionDetector.ensure_loaded_async(self.worker.main_window)
         if not detector.available:
             if not getattr(self, "_mouth_action_detector_warned", False):
                 err = detector.load_error or "unknown error"
@@ -1585,7 +1581,7 @@ class PipelineProcessor:
         _state: "MouthOpennessState | None" = getattr(
             target_fb, "mouth_openness_state", None
         )
-        if _state is None:
+        if _state is None or self.worker.frame_number == 0:
             target_fb.mouth_openness_state = MouthOpennessState()
             _state = target_fb.mouth_openness_state
 
@@ -2975,41 +2971,30 @@ class PipelineProcessor:
                 swap, kps_ref, parameters
             )
 
-        # --- AUTO COLOR (Mask 512) ---
-        # FW-QUAL-12: AutoColorEnableToggle runs here — BEFORE FaceParser mask is applied
-        # to the global swap_mask (the EndingColorTransfer runs at the end, AFTER the
-        # FaceParser end-pass and the final swap_mask re-calculation, so it operates on a
-        # tighter mask that excludes eyes/mouth/hairline etc.).
-
-        # Q-QUAL-03: build a smoothed reference face for AutoColor to reduce per-frame flicker.
-        # Key by target embedding bytes so each target face has its own EMA history.
         original_face_for_color = original_face_512
         if parameters.get("AutoColorEnableToggle", False) and valid_t_e is not None:
             _ema_key = valid_t_e.tobytes()
             _face_f = original_face_512.float()
             _curr_mean = _face_f.mean(dim=(1, 2), keepdim=True)
             _curr_std = _face_f.std(dim=(1, 2), keepdim=True) + 1e-6
-            if _ema_key in self._color_stats_ema:
-                self._color_stats_ema.move_to_end(_ema_key)
-                _prev = self._color_stats_ema[_ema_key]
-                _ema_mean = (
-                    self._COLOR_EMA_ALPHA * _curr_mean
-                    + (1.0 - self._COLOR_EMA_ALPHA) * _prev["mean"]
-                )
-                _ema_std = (
-                    self._COLOR_EMA_ALPHA * _curr_std
-                    + (1.0 - self._COLOR_EMA_ALPHA) * _prev["std"]
-                )
-            else:
-                _ema_mean, _ema_std = _curr_mean, _curr_std
-                # LRU eviction before inserting a new entry
-                if len(self._color_stats_ema) >= self._COLOR_STATS_EMA_MAX:
-                    self._color_stats_ema.popitem(last=False)
-            self._color_stats_ema[_ema_key] = {
-                "mean": _ema_mean.detach(),
-                "std": _ema_std.detach(),
-            }
-            # Remap original_face to have smoothed colour statistics
+
+            with _COLOR_EMA_LOCK:
+                if self.worker.frame_number == 0 or self.worker.is_single_frame:
+                    _COLOR_STATS_EMA.clear()
+                _prev = _COLOR_STATS_EMA.get(_ema_key)
+                if _prev is not None:
+                    _COLOR_STATS_EMA.move_to_end(_ema_key)
+                    _ema_mean = _COLOR_EMA_ALPHA * _curr_mean + (1.0 - _COLOR_EMA_ALPHA) * _prev["mean"]
+                    _ema_std = _COLOR_EMA_ALPHA * _curr_std + (1.0 - _COLOR_EMA_ALPHA) * _prev["std"]
+                else:
+                    _ema_mean, _ema_std = _curr_mean, _curr_std
+                    if len(_COLOR_STATS_EMA) >= _COLOR_STATS_EMA_MAX:
+                        _COLOR_STATS_EMA.popitem(last=False)
+                _COLOR_STATS_EMA[_ema_key] = {
+                    "mean": _ema_mean.detach(),
+                    "std": _ema_std.detach(),
+                }
+
             original_face_for_color = (
                 ((_face_f - _curr_mean) / _curr_std * _ema_std + _ema_mean)
                 .clamp(0, 255)

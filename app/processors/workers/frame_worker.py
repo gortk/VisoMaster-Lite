@@ -387,17 +387,14 @@ class FrameWorker(threading.Thread):
                     traceback.print_exc()
 
                 finally:
-                    # This block executes *no matter what* (success, exception, or break).
-                    # The poison pill (None) counts too: skipping it left unfinished_tasks
-                    # at the number of workers, so the recording tail-drain waited for
-                    # TAIL_PENDING_STALL_TIMEOUT_SEC (8 s) before forcing finalization.
                     if got_item and self.frame_queue is not None:
                         try:
                             self.frame_queue.task_done()
                         except ValueError:
-                            # Safe to ignore if queue was cleared externally
                             pass
-                    # --- FIX RAM LEAK: Clear heavy objects while thread sleeps ---
+                    task = None
+                    local_params_from_feeder = None
+                    local_control_from_feeder = None
                     self.frame = None
                     self.precomputed_bboxes = None
                     self.precomputed_kpss_5 = None
@@ -405,7 +402,6 @@ class FrameWorker(threading.Thread):
                     self.precomputed_kpss_203 = None
                     self.parameters = {}
                     self.local_control_state_from_feeder = {}
-                    task = None
 
             # --- Break Circular References & Clear Caches ---
             # We explicitly wipe the heavy PyTorch VRAM caches when the thread dies to ensure
@@ -417,8 +413,6 @@ class FrameWorker(threading.Thread):
                     self.pipeline_processor._gabor_kernels_cache.clear()
                 if hasattr(self.pipeline_processor, "_gabor_kernels_expanded_cache"):
                     self.pipeline_processor._gabor_kernels_expanded_cache.clear()
-                if hasattr(self.pipeline_processor, "_color_stats_ema"):
-                    self.pipeline_processor._color_stats_ema.clear()
                 self.pipeline_processor._kernel_lap = None
                 self.pipeline_processor._kernel_sobel_x = None
                 self.pipeline_processor._kernel_sobel_y = None
@@ -534,10 +528,7 @@ class FrameWorker(threading.Thread):
                 print(f"[WARN] {self.name} cancelled during process_frame.")
                 return
 
-            # Emit Signals directly with numpy.ndarray (JIT QPixmap creation is now handled by the GUI Thread)
-            if self.video_processor.file_type == "webcam" and not self.is_single_frame:
-                self.video_processor.webcam_frame_processed_signal.emit(self.frame)
-            elif not self.is_single_frame:
+            if not self.is_single_frame:
                 self.video_processor.frame_processed_signal.emit(
                     self.frame_number, self.frame
                 )
@@ -592,14 +583,9 @@ class FrameWorker(threading.Thread):
             ):
                 try:
                     fallback_bgr = np.ascontiguousarray(_fallback_frame_rgb[..., ::-1])
-                    if self.video_processor.file_type == "webcam":
-                        self.video_processor.webcam_frame_processed_signal.emit(
-                            fallback_bgr
-                        )
-                    else:
-                        self.video_processor.frame_processed_signal.emit(
-                            self.frame_number, fallback_bgr
-                        )
+                    self.video_processor.frame_processed_signal.emit(
+                        self.frame_number, fallback_bgr
+                    )
                 except Exception as fb_err:
                     print(
                         f"[WARN] Fallback emit also failed for frame "
@@ -633,15 +619,7 @@ class FrameWorker(threading.Thread):
         with self.lock:
             default_params_dict = dict(self.main_window.default_parameters.data)
 
-        # FW-ARCH-FIX: Trust the Sequential Detector
-        # If the face was already rescued temporally, we bypass the UI threshold
-        current_params = copy.deepcopy(self.parameters)
-        if is_sequentially_tracked:
-            for face_id, p in current_params.items():
-                if isinstance(p, dict):
-                    p["SimilarityThresholdSlider"] = 0.0
-            if "SimilarityThresholdSlider" in default_params_dict:
-                default_params_dict["SimilarityThresholdSlider"] = 0.0
+        current_params = self.parameters
 
         return find_best_target_match(
             detected_embedding_np,

@@ -63,28 +63,19 @@ class TargetMediaLoaderWorker(qtc.QThread):
         self.media_ids = media_ids or []
         self.sort_files_list_by_name = sort_files_list_by_name
 
-        # Safely fetch UI states once to avoid duplication
-        filter_button = getattr(main_window, "targetVideosFilterMenuButton", None)
-        filter_panel_open = (
-            filter_button.isChecked() if filter_button is not None else False
-        )
-
         sort_needs_metadata = target_videos_list_actions.current_sort_needs_metadata(
             main_window
         )
 
-        # Evaluate metadata requirement including the search text state
         if metadata_enabled is None:
-            metadata_enabled = (
-                filter_panel_open or sort_needs_metadata
-            )
+            metadata_enabled = sort_needs_metadata
 
         self.metadata_enabled = bool(metadata_enabled)
 
         print(
             f"[INFO] TargetMediaLoaderWorker initialized. Metadata extraction: "
-            f"{self.metadata_enabled} (Filter panel open: {filter_panel_open}, "
-            f"Sorting requires metadata: {sort_needs_metadata})"
+            f"{self.metadata_enabled} "
+            f"(Sorting requires metadata: {sort_needs_metadata})"
         )
 
         self._running = True  # Flag to control the running state

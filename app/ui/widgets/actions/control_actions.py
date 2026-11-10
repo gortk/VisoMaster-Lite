@@ -974,12 +974,14 @@ def handle_auto_mouth_toggle(main_window: "MainWindow", new_value: bool) -> None
         common_widget_actions.update_gpu_memory_progressbar(main_window)
         return
 
-    detector = MouthActionDetector.get()
-    if not detector.available:
-        err = detector.load_error or "unknown error"
-        print(f"[WARN] Auto Mouth Expression: detector unavailable — {err}")
-    else:
+    detector = MouthActionDetector.ensure_loaded_async(main_window)
+    if detector.available:
         print("[INFO] Auto Mouth Expression enabled. Mouth action detector ready.")
+    else:
+        print(
+            "[INFO] Auto Mouth Expression enabled. "
+            "Loading mouth action detector in background..."
+        )
 
 
 def handle_ff_auto_quality_toggle(main_window: "MainWindow", new_value: bool) -> None:

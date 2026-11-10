@@ -994,18 +994,15 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
         timer.start()
 
     def _do_resize_fit(self):
-        pixmap_item = getattr(self, "_base_pixmap_item", None)
-        if pixmap_item is None:
-            for item in self.scene.items():
-                if isinstance(item, QtWidgets.QGraphicsPixmapItem):
-                    pixmap_item = item
-                    self._base_pixmap_item = item
-                    break
-        if pixmap_item is None:
-            return
-        scene_rect = pixmap_item.boundingRect()
-        self.graphicsViewFrame.setSceneRect(scene_rect)
-        graphics_view_actions.fit_image_to_view(self, pixmap_item, scene_rect)
+        try:
+            pixmap_item = graphics_view_actions.get_base_pixmap_item(self)
+            if pixmap_item is None:
+                return
+            scene_rect = pixmap_item.boundingRect()
+            self.graphicsViewFrame.setSceneRect(scene_rect)
+            graphics_view_actions.fit_image_to_view(self, pixmap_item, scene_rect)
+        except RuntimeError:
+            self._base_pixmap_item = None
 
     def moveEvent(self, event: QtGui.QMoveEvent):
         super().moveEvent(event)
@@ -1203,7 +1200,6 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
 
     def closeEvent(self, event):
         print("[INFO] MainWindow: closeEvent called.")
-
         list_view_actions.stop_filter_workers(self)
         self.video_processor.stop_processing()
         list_view_actions.clear_stop_loading_input_media(self)

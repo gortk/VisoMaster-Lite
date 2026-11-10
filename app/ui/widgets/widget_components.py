@@ -59,19 +59,25 @@ class TwoLineElidedLabel(QtWidgets.QLabel):
         if font_metrics.horizontalAdvance(text) <= max_width:
             return text
 
-        fitted_text = ""
-        last_space_index = -1
-        for index, char in enumerate(text):
-            candidate = fitted_text + char
-            if font_metrics.horizontalAdvance(candidate) > max_width:
-                break
-            fitted_text = candidate
-            if char.isspace():
-                last_space_index = index
+        # P6-PERF: binary search on character index. The previous linear scan
+        # was O(n^2) in horizontalAdvance() calls because it rebuilt the
+        # candidate string each iteration.
+        lo, hi = 0, len(text)
+        while lo < hi:
+            mid = (lo + hi + 1) // 2
+            if font_metrics.horizontalAdvance(text[:mid]) <= max_width:
+                lo = mid
+            else:
+                hi = mid - 1
 
-        if last_space_index > 0:
-            return text[:last_space_index].rstrip()
-        return fitted_text.rstrip()
+        if lo == 0:
+            return ""
+
+        # Prefer to break at the last space in the fitting prefix.
+        last_space = text.rfind(" ", 0, lo)
+        if last_space > 0:
+            return text[:last_space].rstrip()
+        return text[:lo].rstrip()
 
     def _update_display_text(self) -> None:
         if not self._full_text:

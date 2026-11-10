@@ -635,8 +635,6 @@ def extract_frame_as_image(
     main_window: "MainWindow",
     media_file_path,
     file_type,
-    webcam_index=False,
-    webcam_backend=False,
     cache_thumbnail=True,
     scale: tuple[int, int] | None = (70, 70),
     return_metadata=False,
@@ -775,12 +773,6 @@ def extract_frame_as_image(
                 cap = None
             if _attempt < 2:
                 _time.sleep(0.5)
-    elif file_type == "webcam":
-        camera = cv2.VideoCapture(webcam_index, webcam_backend)
-        if camera.isOpened():
-            # Pass 0 for webcam rotation
-            ret, frame = misc_helpers.read_frame(camera, 0)
-            camera.release()  # Release camera immediately after grabbing one frame
 
     if isinstance(frame, np.ndarray):
         # Create a new thumbnail in the cache for next time.
@@ -944,6 +936,7 @@ def show_model_loading_dialog(main_window: "MainWindow"):
 
     if main_window._active_model_loads == 1 and hasattr(main_window, "_show_preview_watermark"):
         main_window._show_preview_watermark()
+        QtWidgets.QApplication.processEvents()
 
 @QtCore.Slot()
 def hide_model_loading_dialog(main_window: "MainWindow"):

@@ -54,7 +54,7 @@ class VideoProcessor(QObject):
     Manages all video, image, and webcam processing pipelines.
 
     This class handles:
-    - Reading frames from media (video, image, webcam).
+    - Reading frames from media (video, image).
     - Dispatching frames to worker threads (FrameWorker) for processing.
     - Managing the display metronome (QTimer) for smooth playback/recording.
     - Handling default and multi-segment recording via FFmpeg.
@@ -69,7 +69,6 @@ class VideoProcessor(QObject):
     # --- Signals ---
     # Removed QPixmap to ensure thread safety. GUI thread will handle conversion.
     frame_processed_signal = Signal(int, numpy.ndarray)
-    webcam_frame_processed_signal = Signal(numpy.ndarray)
     single_frame_processed_signal = Signal(int, int, numpy.ndarray, object)
     processing_started_signal = Signal()  # Unified signal for any processing start
     processing_stopped_signal = Signal()  # Unified signal for any processing stop
@@ -112,7 +111,7 @@ class VideoProcessor(QObject):
 
         # --- Media State ---
         self.media_capture: cv2.VideoCapture | None = None
-        self.file_type: str | None = None  # "video", "image", or "webcam"
+        self.file_type: str | None = None  # "video", "image"
         self.fps = 0.0  # Target FPS for playback or recording
         self.media_path: str | None = None
         self.media_rotation: int = 0
@@ -128,7 +127,6 @@ class VideoProcessor(QObject):
         # Transition flags: reset tracker only when target-face presence changes,
         # not on every frame — prevents ByteTrack reinitialization per frame (webcam FPS fix).
         self._video_had_targets: bool = False
-        self._webcam_had_targets: bool = False
 
         # --- Processing State Flags ---
         self.processing = False  # MASTER flag: True if playback, recording, or webcam stream is active
@@ -205,7 +203,6 @@ class VideoProcessor(QObject):
         # can use it when the near-EOF re-read fails (OpenCV seek unreliability).
         self._seek_cached_frame: Optional[Tuple[int, numpy.ndarray]] = None
 
-        # Note: frames_to_display and webcam_frames_to_display are now managed
         # dynamically via @property decorators routing to self.media_pipeline.
 
         # Frame cache
@@ -346,11 +343,6 @@ class VideoProcessor(QObject):
         """Facade Property: Routes buffer access to the MediaPipeline."""
         return self.media_pipeline.frames_to_display
 
-    @property
-    def webcam_frames_to_display(self) -> queue.Queue:
-        """Facade Property: Routes webcam buffer access to the MediaPipeline."""
-        return self.media_pipeline.webcam_frames_to_display
-
     def store_frame_to_display(self, frame_number: int, frame: numpy.ndarray) -> None:
         """Facade: Routes finished frames to the MediaPipeline."""
         # Let extensions modify the frame before it is displayed or written to FFmpeg
@@ -360,10 +352,6 @@ class VideoProcessor(QObject):
             )
 
         self.media_pipeline.store_frame_to_display(frame_number, frame)
-
-    def store_webcam_frame_to_display(self, frame: numpy.ndarray) -> None:
-        """Facade: Routes finished webcam frames to the MediaPipeline."""
-        self.media_pipeline.store_webcam_frame_to_display(frame)
 
     def stop_live_sound(self) -> None:
         """Facade: Stops audio via MediaPipeline."""
@@ -1013,20 +1001,6 @@ class VideoProcessor(QObject):
             suppress_raw_preview: If True, skips displaying the unprocessed raw frame
                                   while waiting for the AI worker. Prevents UI flashing.
         """
-        # --- WEBCAM LIVE GUARD ---
-        # If the webcam is actively streaming, do NOT stop the feed.
-        # Simply mark the UI state as dirty so the background pipeline picks up
-        # the new parameters (Swap/Edit) on the very next live frame.
-        if self.file_type == "webcam" and self.processing:
-            self.ui_state_is_dirty = True
-            if fit_on_complete:
-                from app.ui.widgets.actions import layout_actions
-
-                QTimer.singleShot(
-                    0,
-                    lambda: layout_actions.fit_image_to_view_onchange(self.main_window),
-                )
-            return None
 
         if self.processing or self.is_processing_segments:
             print("[INFO] Stopping active processing to process single frame.")
@@ -1049,7 +1023,7 @@ class VideoProcessor(QObject):
         # Set frame number for processing
         if self.file_type == "video":
             self.current_frame_number = self.main_window.videoSeekSlider.value()
-        elif self.file_type == "image" or self.file_type == "webcam":
+        elif self.file_type == "image":
             self.current_frame_number = 0
 
         self.next_frame_to_display = self.current_frame_number
@@ -1167,18 +1141,6 @@ class VideoProcessor(QObject):
                 read_successful = True
             else:
                 print("[ERROR] Unable to read image file for processing.")
-
-        elif self.file_type == "webcam" and self.media_capture:
-            ret, frame_bgr = misc_helpers.read_frame(
-                self.media_capture, 0, preview_target_height=None
-            )
-            if ret and frame_bgr is not None:
-                frame_to_process = numpy.ascontiguousarray(
-                    frame_bgr[..., ::-1]
-                )  # BGR to RGB
-                read_successful = True
-            else:
-                print("[ERROR] Unable to read Webcam frame for processing!")
 
         # --- Process if read was successful ---
         if read_successful and frame_to_process is not None:
@@ -1311,12 +1273,6 @@ class VideoProcessor(QObject):
             del arr
         self.frames_to_display.clear()
         self._clear_single_frame_preview_caches()
-        while not self.webcam_frames_to_display.empty():
-            try:
-                arr = self.webcam_frames_to_display.get_nowait()
-                del arr
-            except queue.Empty:
-                break
         with self.frame_queue.mutex:
             self.frame_queue.queue.clear()
 
@@ -1396,41 +1352,6 @@ class VideoProcessor(QObject):
                 )
             else:
                 print("[WARN] Failed to re-open media capture after active stop.")
-        elif self.file_type == "webcam":
-            # For webcam, re-opening essentially prepares it for the next 'Play' click.
-            try:
-                webcam_index = int(
-                    self.main_window.control.get("WebcamDeviceSelection", 0)
-                )
-
-                backend_name = str(
-                    self.main_window.control.get("WebcamBackendSelection", "Default")
-                )
-                backend_id = CAMERA_BACKENDS.get(backend_name, cv2.CAP_ANY)
-
-                self.media_capture = cv2.VideoCapture(webcam_index, backend_id)
-
-                if self.media_capture.isOpened():
-                    try:
-                        fourcc = cv2.VideoWriter_fourcc(*"MJPG")
-                        self.media_capture.set(cv2.CAP_PROP_FOURCC, fourcc)
-                    except Exception:
-                        pass
-
-                    res_str = str(
-                        self.main_window.control.get(
-                            "WebcamMaxResSelection", "1280x720"
-                        )
-                    )
-                    target_width, target_height = map(int, res_str.split("x"))
-                    self.media_capture.set(cv2.CAP_PROP_FRAME_WIDTH, target_width)
-                    self.media_capture.set(cv2.CAP_PROP_FRAME_HEIGHT, target_height)
-                else:
-                    print("[WARN] Failed to re-open webcam capture after stop.")
-                    self.media_capture = None
-            except Exception as e:
-                print(f"[WARN] Error re-opening webcam capture: {e}")
-                self.media_capture = None
 
         # 9. Final cleanup and UI reset
         layout_actions.enable_all_parameters_and_control_widget(self.main_window)
@@ -3451,132 +3372,3 @@ class VideoProcessor(QObject):
                     f"[WARN] Failed to delete temporary directory {self.segment_temp_dir}: {e}"
                 )
         self.segment_temp_dir = None
-
-    # --- Webcam Methods ---
-
-    def process_webcam(self):
-        """Starts the webcam stream using the unified metronome and User Settings."""
-        if self.processing:
-            print("[WARN] Processing already active, cannot start webcam.")
-            return
-        if self.file_type != "webcam":
-            print("[WARN] Process_webcam: Only applicable for webcam input.")
-            return
-
-        # 1. Retrieve User Settings from the UI Control Dictionary
-        try:
-            # Device Index
-            webcam_index = int(self.main_window.control.get("WebcamDeviceSelection", 0))
-
-            # Resolution (String like "1920x1080")
-            res_str = self.main_window.control.get("WebcamMaxResSelection", "1280x720")
-            target_width, target_height = map(int, res_str.split("x"))
-
-            # Backend (String like "DirectShow") -> Mapped to cv2 Constant
-            backend_name = self.main_window.control.get(
-                "WebcamBackendSelection", "Default"
-            )
-            backend_id = CAMERA_BACKENDS.get(backend_name, cv2.CAP_ANY)
-
-            # FPS (String like "30")
-            target_fps = int(self.main_window.control.get("WebCamMaxFPSSelection", 30))
-
-        except Exception as e:
-            print(
-                f"[ERROR] Error parsing webcam settings: {e}. Falling back to defaults."
-            )
-            webcam_index = 0
-            target_width, target_height = 1280, 720
-            backend_id = cv2.CAP_ANY
-            target_fps = 30
-
-        print(
-            f"[INFO] Init Webcam: Device={webcam_index}, Backend={backend_name}, Target={target_width}x{target_height} @ {target_fps}fps"
-        )
-
-        # 2. Initialize VideoCapture with the selected Backend
-        if self.media_capture:
-            misc_helpers.release_capture(self.media_capture)
-            self.media_capture = None
-            # CRITICAL: Wait for OS driver hardware lock to fully release
-            time.sleep(0.5)
-
-        try:
-            self.media_capture = cv2.VideoCapture(webcam_index, backend_id)
-        except Exception as e:
-            print(f"[ERROR] Failed to init webcam with backend {backend_name}: {e}")
-            self.media_capture = cv2.VideoCapture(webcam_index)
-
-        if not (self.media_capture and self.media_capture.isOpened()):
-            print("[ERROR] Unable to open webcam source.")
-            video_control_actions.reset_media_buttons(self.main_window)
-            return
-
-        # 3. Apply Configuration
-        try:
-            # Force MJPG to allow high framerate at high res (saves USB bandwidth)
-            fourcc = cv2.VideoWriter_fourcc(*"MJPG")
-            self.media_capture.set(cv2.CAP_PROP_FOURCC, fourcc)
-        except Exception:
-            pass
-
-        self.media_capture.set(cv2.CAP_PROP_FRAME_WIDTH, target_width)
-        self.media_capture.set(cv2.CAP_PROP_FRAME_HEIGHT, target_height)
-        self.media_capture.set(cv2.CAP_PROP_FPS, target_fps)
-
-        # 4. Verify actual resolution obtained
-        actual_w = self.media_capture.get(cv2.CAP_PROP_FRAME_WIDTH)
-        actual_h = self.media_capture.get(cv2.CAP_PROP_FRAME_HEIGHT)
-        print(
-            f"[INFO] Webcam initialized at: {int(actual_w)}x{int(actual_h)} (Requested: {target_width}x{target_height})"
-        )
-
-        # Warn if the camera refused the resolution
-        if int(actual_w) != target_width or int(actual_h) != target_height:
-            print(
-                f"[WARN] Camera did not accept requested resolution. Using {int(actual_w)}x{int(actual_h)}."
-            )
-            if int(actual_w) == 640 and backend_name != "DirectShow":
-                print(
-                    "[TIP] Try changing 'Webcam Backend' to 'DirectShow' in Settings to unlock HD."
-                )
-
-        print("[INFO] Starting webcam processing setup...")
-
-        # 5. Set State Flags
-        self.processing = True
-        self.is_processing_segments = False
-        self.recording = False
-        self.start_time = time.perf_counter()
-
-        # 6. Clear Containers
-        self.frames_to_display.clear()
-        self.webcam_frames_to_display.queue.clear()
-        with self.frame_queue.mutex:
-            self.frame_queue.queue.clear()
-
-        # --- Clear raw frame queue ---
-        if hasattr(self, "media_pipeline") and hasattr(
-            self.media_pipeline, "raw_frame_queue"
-        ):
-            with self.media_pipeline.raw_frame_queue.mutex:
-                self.media_pipeline.raw_frame_queue.queue.clear()
-
-        # 7. Start Metronome ET Feeder VIA MEDIAPIPELINE
-        fps = self.media_capture.get(cv2.CAP_PROP_FPS)
-        if fps <= 0:
-            fps = 30
-        self.fps = fps
-
-        print(f"[INFO] Webcam target FPS: {self.fps}")
-
-        self.join_and_clear_threads()
-        self.worker_pool_manager.recreate_queue(self.max_display_buffer_size)
-        self.worker_pool_manager.start_persistent_pool(self.num_threads)
-
-        # Start the feeder thread via pipeline
-        print("[INFO] Starting feeder thread via Pipeline (Mode: webcam)...")
-        self.media_pipeline.start_feeder(mode="webcam", recording=False)
-
-        # Start the display metronome
-        self.media_pipeline.start_metronome(self.fps, is_first_start=True)

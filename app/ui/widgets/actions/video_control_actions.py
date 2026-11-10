@@ -1179,6 +1179,14 @@ def _start_issue_scan_ui(
     if toggle_button is not None:
         toggle_button.setEnabled(False)
 
+    # Stop folder auto-watch timers for the scan duration. They would otherwise
+    # fire block_if_issue_scan_active toasts on every tick. Resumed in
+    # _restore_issue_scan_ui.
+    for _timer_attr in ("_target_folder_watch_timer", "_target_folder_poll_timer"):
+        _t = getattr(main_window, _timer_attr, None)
+        if _t is not None:
+            _t.stop()
+
     QtCore.QCoreApplication.processEvents()
 
 
@@ -1228,6 +1236,13 @@ def _restore_issue_scan_ui(main_window: "MainWindow") -> None:
     update_scan_review_button_states(main_window)
     update_drop_frame_button_label(main_window)
     _restore_issue_scan_display(main_window)
+
+    # Resume folder auto-watch if it was enabled before the scan started.
+    if main_window.control.get("AutoLoadTargetFolderToggle", False):
+        from app.ui.widgets.actions import list_view_actions
+
+        list_view_actions.set_target_folder_auto_watch(main_window, True)
+
     QtCore.QCoreApplication.processEvents()
 
 
@@ -1747,16 +1762,6 @@ def play_video(main_window: "MainWindow", checked: bool):
     When *checked* is False: stops any active processing and resets button states.
     """
     video_processor = main_window.video_processor
-    if checked and video_processor.file_type == "webcam":
-        if video_processor.processing:
-            print(
-                "[WARN] Webcam already streaming. Stopping the stream before restarting."
-            )
-            video_processor.stop_processing()
-        print("[INFO] Starting webcam stream processing.")
-        set_play_button_icon_to_stop(main_window)
-        video_processor.process_webcam()
-        return
 
     if checked:
         if video_processor.processing:
@@ -1812,13 +1817,6 @@ def record_video(main_window: "MainWindow", checked: bool):
         main_window.buttonMediaRecord.blockSignals(True)
         main_window.buttonMediaRecord.setChecked(False)
         main_window.buttonMediaRecord.blockSignals(False)
-        if video_processor.file_type == "webcam":
-            common_widget_actions.create_and_show_messagebox(
-                main_window,
-                "Recording Not Supported",
-                "Recording webcam stream is not supported yet.",
-                main_window,
-            )
         return
 
     if checked:

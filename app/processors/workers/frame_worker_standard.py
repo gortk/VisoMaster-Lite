@@ -461,12 +461,7 @@ class StandardProcessor:
                         )
                         fface["matched_target"] = tgt
                         if tgt and tgt.face_id == target_face.face_id:
-                            # FW-ARCH-FIX: Bypass strict UI threshold locally if rescued temporally
-                            effective_threshold = (
-                                tgt_params["SimilarityThresholdSlider"]
-                                if not is_sequentially_tracked
-                                else 0.0
-                            )
+                            effective_threshold = tgt_params["SimilarityThresholdSlider"]
                             if score >= effective_threshold and score > best_score:
                                 best_score = score
                                 best_fface = fface

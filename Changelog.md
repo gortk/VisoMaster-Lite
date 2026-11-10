@@ -1,9 +1,20 @@
+### 1.0.5
+
+- Fixed the annoying toast "Cannot auto-load target media while an issue scan is running" when the
+  issue scanner is running.
+- Fixed issue where the "scan for issues" would mark "bad frames" but when the user stands over those 
+  frames, the swap is still done correctly. Now those are not detected and the output video gets the 
+  full swap instead of dropping those frames.  
+- Even more patching done to prevent last_workspace.json from getting corrupted. I'm afraid this can 
+  be a repeated theme as the issue seems rather random at the moment, so its difficult to test.
+- Enabling the "auto mouth expression" no longer freezes the app. 
+ 
+
 ### 1.0.4
 
 - Hopefully fixed the bug where sometimes the last_workspace.json gets corrupted and replaced with a defaults copy.
 - Added the first 'official' extension: inpainting.
 - Fixed the long (unnecessary) menu that appeared in the profiles in face editor.
-
 
 ### 1.0.3
 

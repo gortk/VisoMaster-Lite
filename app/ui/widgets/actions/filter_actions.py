@@ -3,8 +3,6 @@ from typing import TYPE_CHECKING
 from PySide6 import QtCore, QtWidgets
 from shiboken6 import isValid
 
-from app.ui.widgets.sortable_widgets import SortableListWidgetItem
-
 if TYPE_CHECKING:
     from app.ui.main_ui import MainWindow
 
@@ -14,59 +12,25 @@ def filter_target_videos(main_window: "MainWindow", *args):
         return
     main_window.target_videos_filter_worker.stop_thread()
 
-    filter_button = getattr(main_window, "targetVideosFilterMenuButton", None)
-    filter_panel_open = filter_button is not None and filter_button.isChecked()
-
     search_box = getattr(main_window, "targetVideosSearchBox", None)
     search_text = search_box.text().lower() if search_box else ""
 
-    # Early exit when the filter panel is closed AND search text is empty
-    if not filter_panel_open and not search_text:
+    if not search_text:
         for i in range(main_window.targetVideosList.count()):
             main_window.targetVideosList.item(i).setHidden(False)
         return
 
-    include_file_types = []
-    min_width = 0
-    min_height = 0
-
-    # Only apply advanced filters if the panel is open
-    if filter_panel_open:
-        if main_window.targetVideosFilterImagesCheckBox.isChecked():
-            include_file_types.append("image")
-        if main_window.targetVideosFilterVideosCheckBox.isChecked():
-            include_file_types.append("video")
-
-        min_dimension = main_window.targetVideosList.minImageDimension()
-        min_width = min_dimension.width if min_dimension else 0
-        min_height = min_dimension.height if min_dimension else 0
-    else:
-        # If panel is closed, allow all types and sizes so ONLY the search text applies
-        include_file_types = ["image", "video", "webcam"]
-
-    # Capture all Qt widget data in the main thread before starting the worker
     items_snapshot = []
     for i in range(main_window.targetVideosList.count()):
         item = main_window.targetVideosList.item(i)
         item_widget = main_window.targetVideosList.itemWidget(item)
         if item_widget is None:
             continue
-        imgdim = (
-            item.imageDimension() if isinstance(item, SortableListWidgetItem) else None
-        )
-        items_snapshot.append(
-            (
-                i,
-                str(item_widget.media_path),
-                item_widget.file_type,
-                imgdim.width if imgdim else 0,
-                imgdim.height if imgdim else 0,
-            )
-        )
+        items_snapshot.append((i, str(item_widget.media_path), item_widget.file_type, 0, 0))
 
     worker = main_window.target_videos_filter_worker
-    worker.include_file_types = include_file_types
-    worker.min_image_size = (min_width, min_height)
+    worker.include_file_types = ["image", "video"]
+    worker.min_image_size = (0, 0)
     worker.search_text = search_text
     worker.items_snapshot = items_snapshot
     worker.start()

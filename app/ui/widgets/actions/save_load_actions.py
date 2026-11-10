@@ -2,6 +2,8 @@ import os
 import json
 import hashlib
 import io
+import time
+import shutil
 import threading
 from pathlib import Path
 import uuid
@@ -28,8 +30,46 @@ import app.helpers.miscellaneous as misc_helpers
 if TYPE_CHECKING:
     from app.ui.main_ui import MainWindow
 
-# Global lock for registry I/O to ensure thread safety across concurrent saves
 _KV_REGISTRY_LOCK = threading.Lock()
+_WORKSPACE_WRITE_LOCK = threading.Lock()
+
+
+def _repair_workspace_file_if_needed(data_filename):
+    primary = str(data_filename)
+    bak = primary + ".bak"
+    bak2 = primary + ".bak2"
+
+    primary_ok = False
+    if os.path.isfile(primary):
+        try:
+            with open(primary, "r", encoding="utf-8") as f:
+                json.load(f)
+            primary_ok = True
+        except (OSError, json.JSONDecodeError, ValueError):
+            pass
+
+    if primary_ok:
+        return True
+
+    for candidate in (bak, bak2):
+        if not os.path.isfile(candidate):
+            continue
+        try:
+            with open(candidate, "r", encoding="utf-8") as src:
+                content = src.read()
+            json.loads(content)
+        except (OSError, json.JSONDecodeError, ValueError):
+            continue
+        try:
+            with open(primary, "w", encoding="utf-8") as dst:
+                dst.write(content)
+            print(f"[WARN] Restored workspace from {candidate}")
+            return True
+        except OSError as e:
+            print(f"[ERROR] Failed to restore workspace from {candidate}: {e}")
+            return False
+
+    return False
 
 
 def _notify_workspace_load_done(main_window) -> None:
@@ -40,6 +80,7 @@ def _notify_workspace_load_done(main_window) -> None:
             cb()
         except Exception as e:
             print(f"[WARN] workspace completion callback failed: {e}")
+
 
 def _load_registry(registry_path: Path) -> Dict[str, List[str]]:
     """
@@ -80,7 +121,6 @@ def _update_registry(
     with _KV_REGISTRY_LOCK:
         registry = _load_registry(registry_path)
 
-        # Initialize the list for this KV map if it doesn't exist
         if kv_filename not in registry:
             registry[kv_filename] = []
 
@@ -88,13 +128,11 @@ def _update_registry(
         for path in parent_file_paths:
             if not path:
                 continue
-            # Normalize path separators for consistency across OS (e.g., resolving \ vs /)
             normalized_path = str(Path(path).resolve())
             if normalized_path not in registry[kv_filename]:
                 registry[kv_filename].append(normalized_path)
                 registry_modified = True
 
-        # Write back to disk only if changes were made
         if registry_modified:
             try:
                 with open(registry_path, "w", encoding="utf-8") as f:
@@ -115,21 +153,17 @@ def _save_hashed_kv_payload(
     Registers multiple dependencies (e.g., workspace JSON and source image) in a central JSON manifest.
     """
     try:
-        # 1. Serialize payload to memory to compute the hash safely without disk I/O
         buffer = io.BytesIO()
         torch.save(payload, buffer)
         buffer_bytes = buffer.getvalue()
 
-        # 2. Compute SHA-256 hash
         payload_hash = hashlib.sha256(buffer_bytes).hexdigest()
 
-        # 3. Define directory and file path
         kv_data_dir = main_window.project_root_path / "model_assets" / sub_folder
         kv_data_dir.mkdir(parents=True, exist_ok=True)
 
         kv_map_file = kv_data_dir / f"kv_{payload_hash}.pt"
 
-        # 4. Only write to disk if the file doesn't already exist (Deduplication)
         if not kv_map_file.exists():
             with open(kv_map_file, "wb") as f:
                 f.write(buffer_bytes)
@@ -139,7 +173,6 @@ def _save_hashed_kv_payload(
                 f"[INFO] K/V map {kv_map_file.name} already exists. Skipping disk write."
             )
 
-        # 5. Update the central registry (Reference Counting)
         if parent_file_paths:
             _update_registry(
                 main_window, kv_map_file.name, parent_file_paths, sub_folder
@@ -171,15 +204,12 @@ def sanitize_markers_dictionary(
     for marker_position, marker_data in markers.items():
         marker_payload = copy.deepcopy(marker_data)
 
-        # 1. Sanitize Control Settings
         marker_payload["control"] = sanitize_state_dictionary(
             marker_payload.get("control", {}), default_control
         )
 
-        # 2. Sanitize Parameters (mapped by face_id)
         if "parameters" in marker_payload:
             for face_id, face_params in marker_payload["parameters"].items():
-                # Extract dictionary if it's wrapped in ParametersDict
                 face_params_dict = (
                     face_params.data if hasattr(face_params, "data") else face_params
                 )
@@ -202,14 +232,12 @@ def sanitize_state_dictionary(loaded_dict: dict, reference_dict: dict) -> dict:
     if not isinstance(loaded_dict, dict):
         return copy.deepcopy(reference_dict)
 
-    # 1. Inject defaults for missing keys and retain valid loaded keys
     for key, default_value in reference_dict.items():
         if key in loaded_dict:
             sanitized_dict[key] = loaded_dict[key]
         else:
             sanitized_dict[key] = default_value
 
-    # 2. Identify and log keys that exist in the loaded file but are no longer in the app
     obsolete_keys = set(loaded_dict.keys()) - set(reference_dict.keys())
     if obsolete_keys:
         print(
@@ -333,21 +361,17 @@ def open_embeddings_from_file(main_window: "MainWindow"):
                 embeddings_list = json.load(embed_file)
                 card_actions.clear_merged_embeddings(main_window)
 
-                # Reset for each target face
                 for _, target_face in main_window.target_faces.items():
                     target_face.assigned_merged_embeddings = {}
                     target_face.assigned_input_embedding = {}
 
-                # Load embeddings from file and build the embedding_store dictionary
                 for embed_data in embeddings_list:
                     embedding_store = embed_data.get("embedding_store", {})
-                    # Convert each embedding to a numpy array
                     for recogn_model, embed in embedding_store.items():
                         embedding_store[recogn_model] = np.array(embed)
 
                     embedding_id = str(uuid.uuid1().int)
 
-                    # Pass the entire embedding_store to the function
                     list_view_actions.create_and_add_embed_button_to_list(
                         main_window,
                         embed_data["name"],
@@ -355,7 +379,6 @@ def open_embeddings_from_file(main_window: "MainWindow"):
                         embedding_id=embedding_id,
                     )
 
-                    # Restore KV map if it exists
                     if embedding_id in main_window.merged_embeddings:
                         embed_button = main_window.merged_embeddings[embedding_id]
                         kv_map_path = embed_data.get("kv_map")
@@ -365,7 +388,6 @@ def open_embeddings_from_file(main_window: "MainWindow"):
                                     kv_map_path, map_location="cpu", weights_only=False
                                 )
                                 if isinstance(payload, dict):
-                                    # Check for new list format first, fallback to legacy dict format
                                     if "kv_map_list" in payload:
                                         embed_button.kv_map_list = payload[
                                             "kv_map_list"
@@ -377,7 +399,6 @@ def open_embeddings_from_file(main_window: "MainWindow"):
                                 print(
                                     f"[INFO] Restored standalone K/V map for imported embedding: {embed_data['name']}"
                                 )
-                                # SELF-HEALING REGISTRY: Log this dependency on load
                                 _update_registry(
                                     main_window,
                                     Path(kv_map_path).name,
@@ -399,7 +420,6 @@ def open_embeddings_from_file(main_window: "MainWindow"):
         embedding_filename or main_window.loaded_embedding_filename
     )
 
-    # Sync active embedding tab state
     tabs = getattr(main_window, "embeddingTabs", None)
     states = getattr(main_window, "embedding_tab_states", None)
     if tabs is not None and states:
@@ -409,6 +429,7 @@ def open_embeddings_from_file(main_window: "MainWindow"):
             states[idx]["filename"] = main_window.loaded_embedding_filename or ""
             states[idx]["list_widget"] = main_window.inputEmbeddingsList
             list_view_actions.update_active_embedding_tab_title(main_window)
+
 
 def load_embeddings_into_current_tab(
     main_window: "MainWindow", embedding_filename: str
@@ -472,6 +493,7 @@ def load_embeddings_into_current_tab(
         print(f"[ERROR] Failed to load embeddings from {embedding_filename}: {e}")
         return False
 
+
 def save_embeddings_to_file(main_window: "MainWindow", save_as=False):
     if not main_window.merged_embeddings:
         common_widget_actions.create_and_show_messagebox(
@@ -482,7 +504,6 @@ def save_embeddings_to_file(main_window: "MainWindow", save_as=False):
         )
         return
 
-    # Define the save filename at the start so we can register dependencies
     embedding_filename = main_window.loaded_embedding_filename
     if (
         not embedding_filename
@@ -493,7 +514,7 @@ def save_embeddings_to_file(main_window: "MainWindow", save_as=False):
             main_window, filter="JSON (*.json)"
         )
         if not embedding_filename:
-            return  # User cancelled the save
+            return
     elif (
         QtWidgets.QMessageBox.question(
             main_window,
@@ -509,24 +530,20 @@ def save_embeddings_to_file(main_window: "MainWindow", save_as=False):
     ):
         return
 
-    # Build a list of dicts, each containing the embedding name, embedding_store, and kv_map path
     embeddings_list = []
     for embedding_id, embed_button in main_window.merged_embeddings.items():
         kv_map_path = None
-        # Check for either the new list format or the legacy map format
         kv_payload_to_save = getattr(embed_button, "kv_map_list", None) or getattr(
             embed_button, "kv_map", None
         )
 
         if kv_payload_to_save is not None:
             try:
-                # Save whatever payload we found (either a List[Dict] or a Dict)
                 payload = (
                     {"kv_map_list": kv_payload_to_save}
                     if getattr(embed_button, "kv_map_list", None)
                     else {"kv_map": kv_payload_to_save}
                 )
-                # Optimize: Route through hashing helper to deduplicate and register
                 kv_map_path = _save_hashed_kv_payload(
                     main_window,
                     payload,
@@ -543,20 +560,16 @@ def save_embeddings_to_file(main_window: "MainWindow", save_as=False):
                 "name": embed_button.embedding_name,
                 "embedding_store": {
                     k: v.tolist() for k, v in embed_button.embedding_store.items()
-                },  # Convert embeddings to lists
-                "kv_map": kv_map_path,  # Save the path to JSON file
+                },
+                "kv_map": kv_map_path,
             }
         )
 
-    # Save to file
     if embedding_filename:
         with open(embedding_filename, "w", encoding="utf-8") as embed_file:
-            embeddings_as_json = json.dumps(
-                embeddings_list, indent=4
-            )  # Save with indentation for readability
+            embeddings_as_json = json.dumps(embeddings_list, indent=4)
             embed_file.write(embeddings_as_json)
 
-            # Show a confirmation message
             common_widget_actions.create_and_show_toast_message(
                 main_window,
                 "Embeddings Saved",
@@ -566,9 +579,6 @@ def save_embeddings_to_file(main_window: "MainWindow", save_as=False):
         main_window.loaded_embedding_filename = embedding_filename
 
 
-# This method is used to convert the data type of Parameters Dict
-# Parameters are converted to dict when serializing to JSON
-# Parameters are converted to ParametersDict when reading from JSON
 def convert_parameters_to_supported_type(
     main_window: "MainWindow",
     parameters: Union[dict, ParametersTypes],
@@ -591,7 +601,6 @@ def convert_markers_to_supported_type(
     markers: MarkerTypes,
     convert_type: type,
 ):
-    # Convert Parameters inside the markers from ParametersDict to dict
     for _, marker_data in markers.items():
         if "parameters" in marker_data:
             for target_face_id, target_parameters in marker_data["parameters"].items():
@@ -624,9 +633,7 @@ def save_current_parameters_and_control(main_window: "MainWindow", face_id):
 
     if data_filename:
         with open(data_filename, "w") as data_file:  # pylint: disable=unspecified-encoding
-            data_as_json = json.dumps(
-                data, indent=4
-            )  # Save with indentation for readability
+            data_as_json = json.dumps(data, indent=4)
             data_file.write(data_as_json)
 
 
@@ -646,7 +653,6 @@ def load_parameters_and_settings(
         with open(data_filename, "r") as data_file:  # pylint: disable=unspecified-encoding
             data = json.load(data_file)
 
-            # --- Sanitize Parameters ---
             default_params = cast(
                 misc_helpers.ParametersDict, main_window.default_parameters
             ).data
@@ -663,7 +669,6 @@ def load_parameters_and_settings(
                     main_window, face_id
                 )
             if load_settings:
-                # --- Sanitize Controls ---
                 sanitized_control = sanitize_state_dictionary(
                     data.get("control", {}), main_window.control
                 )
@@ -680,17 +685,17 @@ def get_auto_load_workspace_toggle(
         data_filename, _ = QtWidgets.QFileDialog.getOpenFileName(
             main_window, filter="JSON (*.json)"
         )
-    # Check if File exists (In cases when filename is passed as function argument instead of from the file picker)
-    if isinstance(data_filename, str) and not Path(data_filename).is_file():
-        data_filename = False
-    if data_filename:
-        with open(data_filename, "r") as data_file:  # pylint: disable=unspecified-encoding
-            try:
+    if not isinstance(data_filename, str) or not data_filename:
+        return False
+    _repair_workspace_file_if_needed(data_filename)
+    for _cand in (data_filename, f"{data_filename}.bak", f"{data_filename}.bak2"):
+        try:
+            with open(_cand, "r", encoding="utf-8") as data_file:
                 data = json.load(data_file)
-            except json.JSONDecodeError:
-                return False
-            control = data["control"]
-            return control.get("AutoLoadWorkspaceToggle", False)
+            return data.get("control", {}).get("AutoLoadWorkspaceToggle", False)
+        except (OSError, ValueError, AttributeError):
+            continue
+    return False
 
 
 def load_saved_workspace(main_window, data_filename=False):
@@ -700,12 +705,29 @@ def load_saved_workspace(main_window, data_filename=False):
         data_filename, _ = QtWidgets.QFileDialog.getOpenFileName(
             main_window, filter="JSON (*.json)"
         )
-    if not (isinstance(data_filename, str) and Path(data_filename).is_file()):
+    if not isinstance(data_filename, str):
         return
-    try:
-        with open(data_filename, "r", encoding="utf-8") as data_file:
-            data = json.load(data_file)
-    except (json.JSONDecodeError, KeyError, TypeError) as e:
+    _repair_workspace_file_if_needed(data_filename)
+    bak_path = f"{data_filename}.bak"
+    bak2_path = f"{data_filename}.bak2"
+    if not (
+        Path(data_filename).is_file()
+        or Path(bak_path).is_file()
+        or Path(bak2_path).is_file()
+    ):
+        return
+    data = None
+    for _candidate in (data_filename, bak_path, bak2_path):
+        try:
+            with open(_candidate, "r", encoding="utf-8") as data_file:
+                data = json.load(data_file)
+            if _candidate != data_filename:
+                print(f"[WARN] Recovered workspace from {_candidate}")
+            break
+        except (json.JSONDecodeError, KeyError, TypeError, OSError):
+            continue
+    if data is None:
+        e = RuntimeError("workspace JSON and all backups unreadable")
         broken_path = f"{data_filename}.broken.{int(time.time())}"
         moved = False
         try:
@@ -714,6 +736,13 @@ def load_saved_workspace(main_window, data_filename=False):
             print(f"[WARN] Broken workspace preserved as {broken_path}")
         except OSError as re:
             print(f"[WARN] Could not preserve broken workspace: {re}")
+        for _bkp in (bak_path, bak2_path):
+            try:
+                if os.path.exists(_bkp):
+                    os.rename(_bkp, f"{_bkp}.broken.{int(time.time())}")
+            except OSError:
+                pass
+        main_window._workspace_load_failed = True
         QtWidgets.QMessageBox.critical(
             main_window,
             "Error",
@@ -722,6 +751,7 @@ def load_saved_workspace(main_window, data_filename=False):
         )
         _notify_workspace_load_done(main_window)
         return
+    main_window._workspace_load_failed = False
     _workspace_load_begin(main_window, data, data_filename)
 
 
@@ -753,10 +783,7 @@ def _workspace_load_begin(main_window, data, data_filename):
             files_list=target_medias_files_list,
             media_ids=target_media_ids,
             sort_files_list_by_name=False,
-            metadata_enabled=bool(
-                window_state.get("targetVideosFilterMenuExpanded", False)
-                or target_videos_list_actions.current_sort_needs_metadata(main_window)
-            ),
+            metadata_enabled=target_videos_list_actions.current_sort_needs_metadata(main_window),
         )
         main_window.video_loader_worker.thumbnail_ready.connect(
             partial(
@@ -776,6 +803,9 @@ def _workspace_load_begin(main_window, data, data_filename):
             ),
         )
     except (KeyError, TypeError) as e:
+        # The chain is aborted, so the UI holds a half-loaded state. Block the
+        # autosave so it cannot overwrite the good file with that state.
+        main_window._workspace_load_failed = True
         QtWidgets.QMessageBox.critical(
             main_window, "Error", f"Failed to load workspace: {e}"
         )
@@ -834,6 +864,9 @@ def _workspace_after_targets(main_window, data, data_filename):
             ),
         )
     except (KeyError, TypeError) as e:
+        # The chain is aborted, so the UI holds a half-loaded state. Block the
+        # autosave so it cannot overwrite the good file with that state.
+        main_window._workspace_load_failed = True
         QtWidgets.QMessageBox.critical(
             main_window, "Error", f"Failed to load workspace: {e}"
         )
@@ -858,6 +891,9 @@ def _workspace_after_inputs(main_window, data, data_filename):
     try:
         main_window.placeholder_update_signal.emit(main_window.inputFacesList, False)
     except (KeyError, TypeError) as e:
+        # The chain is aborted, so the UI holds a half-loaded state. Block the
+        # autosave so it cannot overwrite the good file with that state.
+        main_window._workspace_load_failed = True
         QtWidgets.QMessageBox.critical(
             main_window, "Error", f"Failed to load workspace: {e}"
         )
@@ -866,7 +902,6 @@ def _workspace_after_inputs(main_window, data, data_filename):
 
     steps = []
 
-    # --- Input face K/V maps (one step per face) ---
     def _load_input_kv(face_id, input_face_data):
         input_face_button = main_window.input_faces.get(face_id)
         if input_face_button is None:
@@ -892,7 +927,6 @@ def _workspace_after_inputs(main_window, data, data_filename):
     for face_id, input_face_data in data.get("input_faces_data", {}).items():
         steps.append(partial(_load_input_kv, face_id, input_face_data))
 
-    # --- Embeddings (one step per embedding) ---
     def _load_embedding(embedding_id, embedding_data):
         embedding_store_loaded = {
             m: np.array(e) for m, e in embedding_data["embedding_store"].items()
@@ -938,7 +972,6 @@ def _workspace_after_inputs(main_window, data, data_filename):
         )
     )
 
-    # --- Target faces (one step per face) ---
     def _load_target_face(face_id, target_face_data):
         cropped_face = np.array(target_face_data["cropped_face"]).astype("uint8")
         pixmap = common_widget_actions.get_pixmap_from_frame(main_window, cropped_face)
@@ -982,7 +1015,6 @@ def _workspace_after_inputs(main_window, data, data_filename):
     for face_id, target_face_data in data.get("target_faces_data", {}).items():
         steps.append(partial(_load_target_face, face_id, target_face_data))
 
-    # --- Markers, folders, controls ---
     def _restore_markers_controls():
         video_control_actions.remove_all_markers(main_window)
         main_window.job_marker_pairs = data.get("job_marker_pairs", [])
@@ -1060,7 +1092,6 @@ def _workspace_after_inputs(main_window, data, data_filename):
 
     steps.append(_restore_markers_controls)
 
-    # --- Recalc assignments per face (chunked) ---
     def _recalc_one(face_id):
         btn = main_window.target_faces.get(face_id)
         if btn is not None:
@@ -1069,7 +1100,6 @@ def _workspace_after_inputs(main_window, data, data_filename):
     for face_id in data.get("target_faces_data", {}).keys():
         steps.append(partial(_recalc_one, face_id))
 
-    # --- Tab order + selected face + swap/edit button restore ---
     def _restore_tab_order_and_selection():
         if "tab_state" in data:
             tab_state = data["tab_state"]
@@ -1087,7 +1117,6 @@ def _workspace_after_inputs(main_window, data, data_filename):
                             tab_texts[main_window.tabWidget.tabText(j)] = j
             if "current_tab_index" in tab_state:
                 main_window.tabWidget.setCurrentIndex(tab_state["current_tab_index"])
-
 
         if main_window.target_faces:
             saved_face_id = data.get("selected_target_face_id")
@@ -1151,7 +1180,6 @@ def _workspace_after_inputs(main_window, data, data_filename):
 
     steps.append(_restore_tab_order_and_selection)
 
-    # --- Window state / panels / dock / filter ---
     def _restore_window_state():
         window_state = data.get("window_state_data", {})
         needs_post_restore_frame_clamp = _apply_workspace_window_state(
@@ -1221,38 +1249,46 @@ def _workspace_after_inputs(main_window, data, data_filename):
     _run_workspace_steps(main_window, steps, 0)
 
 
-def _run_workspace_steps(main_window, steps, index):
+def _run_workspace_steps(main_window, steps, index, errors=None):
+    if errors is None:
+        errors = []
     if index >= len(steps):
+        if errors:
+            print(f"[WARN] Workspace loaded with {len(errors)} failed step(s).")
         _notify_workspace_load_done(main_window)
+        if errors:
+            QtWidgets.QMessageBox.warning(
+                main_window,
+                "Workspace partially loaded",
+                f"{len(errors)} part(s) of the workspace could not be restored "
+                "(details in the console). Everything else was loaded.\n\n"
+                "Saving is still enabled, so the parts that failed will be "
+                "dropped from last_workspace.json on the next save.\n\n"
+                f"First error:\n{errors[0]}",
+            )
         return
     try:
         steps[index]()
     except Exception:
         import traceback
+
         traceback.print_exc()
-        QtWidgets.QMessageBox.critical(
-            main_window,
-            "Error",
-            f"Failed to load workspace:\n{traceback.format_exc()}",
-        )
-        _notify_workspace_load_done(main_window)
-        return
+        errors.append(traceback.format_exc())
     QtCore.QTimer.singleShot(
         0,
-        partial(_run_workspace_steps, main_window, steps, index + 1),
+        partial(_run_workspace_steps, main_window, steps, index + 1, errors),
     )
 
 
 def save_current_workspace(
     main_window: "MainWindow", data_filename: str | Path | bool = False
 ):
-    # Prompt for filename FIRST so we can use it for the registry and avoid useless work if cancelled
     if data_filename is False:
         dialog_filename, _ = QtWidgets.QFileDialog.getSaveFileName(
             main_window, filter="JSON (*.json)"
         )
         if not dialog_filename:
-            return  # User cancelled the save operation
+            return
         data_filename = dialog_filename
 
     resolved_parent_path = str(data_filename)
@@ -1262,8 +1298,6 @@ def save_current_workspace(
     input_faces_data = {}
     target_medias_data = []
 
-    # --- Save Window State ---
-    # --- Save dock layout / panel sizes ---
     saved_is_maximized = bool(main_window.isMaximized())
     saved_geometry = main_window.geometry()
 
@@ -1271,7 +1305,7 @@ def save_current_workspace(
         dock_state_data = main_window.saveState().toBase64().data().decode("utf-8")
     except Exception:
         dock_state_data = ""
-        
+
     window_state_data = {
         "x": saved_geometry.x(),
         "y": saved_geometry.y(),
@@ -1292,7 +1326,6 @@ def save_current_workspace(
             == list_view_actions._SMALL_FACE_BUTTON_SIZE
             else "large"
         ),
-        # Add this line:
         "target_thumbnail_size": getattr(
             main_window, "target_thumbnail_button_size", (85, 85)
         ),
@@ -1305,8 +1338,7 @@ def save_current_workspace(
         },
         "dock_state": dock_state_data,
     }
-    
-    # --- Check if Denoiser is enabled ---
+
     control = main_window.control
     is_denoiser_enabled = (
         control.get("DenoiserUNetEnableBeforeRestorersToggle", False)
@@ -1314,7 +1346,6 @@ def save_current_workspace(
         or control.get("DenoiserAfterRestorersToggle", False)
     )
 
-    # --- Serialize Target Medias ---
     for media_id, target_media in main_window.target_videos.items():
         target_medias_data.append(
             {
@@ -1324,13 +1355,11 @@ def save_current_workspace(
             }
         )
 
-    # --- Serialize Input Faces ---
     for face_id, input_face in main_window.input_faces.items():
         kv_map_path = None
         if is_denoiser_enabled and getattr(input_face, "kv_map", None) is not None:
             try:
                 payload = {"kv_map": input_face.kv_map}
-                # Optimize: Route through hashing helper to deduplicate and register BOTH paths
                 kv_map_path = _save_hashed_kv_payload(
                     main_window,
                     payload,
@@ -1350,7 +1379,6 @@ def save_current_workspace(
             "kv_map": kv_map_path,
         }
 
-    # --- Serialize Target Faces & Parameters ---
     for face_id, target_face in main_window.target_faces.items():
         assigned_kv_map_serializable = None
         target_faces_data[face_id] = {
@@ -1361,7 +1389,7 @@ def save_current_workspace(
             },
             "parameters": main_window.parameters.get(
                 str(face_id), main_window.default_parameters
-            ).data.copy(),  # Use .get with default, ensure it's dict
+            ).data.copy(),
             "assigned_input_faces": list(target_face.assigned_input_faces.keys()),
             "assigned_merged_embeddings": list(
                 target_face.assigned_merged_embeddings.keys()
@@ -1373,23 +1401,19 @@ def save_current_workspace(
             "assigned_kv_map": assigned_kv_map_serializable,
         }
 
-    # --- Serialize Embeddings ---
     for embedding_id, embedding_button in list_view_actions.get_all_merged_embeddings(main_window).items():
         kv_map_path = None
-        # Check for either the new list format or the legacy map format
         kv_payload_to_save = getattr(embedding_button, "kv_map_list", None) or getattr(
             embedding_button, "kv_map", None
         )
 
         if kv_payload_to_save is not None:
             try:
-                # Save whatever payload we found
                 payload = (
                     {"kv_map_list": kv_payload_to_save}
                     if getattr(embedding_button, "kv_map_list", None)
                     else {"kv_map": kv_payload_to_save}
                 )
-                # Optimize: Route through hashing helper to deduplicate and register
                 kv_map_path = _save_hashed_kv_payload(
                     main_window,
                     payload,
@@ -1410,8 +1434,6 @@ def save_current_workspace(
             "kv_map": kv_map_path,
         }
 
-    # --- Serialize Markers ---
-    # Convert Parameters inside the markers from ParametersDict to dict before saving
     markers_to_save = sanitize_markers_dictionary(
         main_window,
         convert_markers_to_supported_type(
@@ -1419,28 +1441,22 @@ def save_current_workspace(
         ),
     )
 
-    # Save tab order - store the current tab index and the tab order
     tab_state = {
         "current_tab_index": main_window.tabWidget.currentIndex(),
         "tab_order": [],
     }
 
-    # Store the tab order by getting the tab text for each position
     for i in range(main_window.tabWidget.count()):
         tab_state["tab_order"].append(
             {"text": main_window.tabWidget.tabText(i), "original_index": i}
         )
 
-    # --- Prepare Workspace Data ---
     current_params_to_save = {}
     if isinstance(main_window.current_widget_parameters, misc_helpers.ParametersDict):
-        # If it's the expected custom class, get its underlying data dictionary
         current_params_to_save = main_window.current_widget_parameters.data.copy()
     elif isinstance(main_window.current_widget_parameters, dict):
-        # If it's already a dictionary (the unexpected case), just copy it
         current_params_to_save = main_window.current_widget_parameters.copy()
     else:
-        # Fallback for safety, log a warning
         print(
             f"[WARN] Unexpected type for current widget parameters: {type(main_window.current_widget_parameters)}. Saving empty dict."
         )
@@ -1469,31 +1485,75 @@ def save_current_workspace(
             for face_id, frames in main_window.issue_frames_by_face.items()
         },
         "dropped_frames": sorted(main_window.dropped_frames),
-        "job_marker_pairs": main_window.job_marker_pairs,  # Save the list of tuples
+        "job_marker_pairs": main_window.job_marker_pairs,
         "last_target_media_folder_path": main_window.last_target_media_folder_path,
         "last_input_media_folder_path": main_window.last_input_media_folder_path,
         "loaded_embedding_filename": main_window.loaded_embedding_filename,
         "embedding_tabs_state": list_view_actions.get_embedding_tabs_state(
             main_window
         ),
-        "current_widget_parameters": current_params_to_save,  # Use the safely prepared dict
-        "tab_state": tab_state,  # Add the tab state to the saved data
+        "current_widget_parameters": current_params_to_save,
+        "tab_state": tab_state,
         "window_state_data": window_state_data,
     }
 
     if data_filename:
-        tmp_path = f"{data_filename}.tmp"
+        _is_last_ws = str(data_filename).endswith("last_workspace.json")
+
+        if _is_last_ws and getattr(main_window, "_workspace_load_in_progress", False):
+            print("[WARN] Skipping last_workspace save: workspace load in progress")
+            return
+
+        if _is_last_ws and getattr(main_window, "_workspace_load_failed", False):
+            print("[WARN] Skipping last_workspace save: previous load failed")
+            return
+
+        tmp_path = f"{data_filename}.{os.getpid()}.{uuid.uuid4().hex[:8]}.tmp"
+        bak_path = f"{data_filename}.bak"
+        bak2_path = f"{data_filename}.bak2"
         try:
             data_as_json = json.dumps(data, indent=4)
-            with open(tmp_path, "w", encoding="utf-8") as data_file:
-                data_file.write(data_as_json)
-                data_file.flush()
+            with _WORKSPACE_WRITE_LOCK:
+                with open(tmp_path, "w", encoding="utf-8") as data_file:
+                    data_file.write(data_as_json)
+                    data_file.flush()
+                    try:
+                        os.fsync(data_file.fileno())
+                    except OSError:
+                        pass
+                with open(tmp_path, "r", encoding="utf-8") as _chk:
+                    json.load(_chk)
+                for _attempt in range(10):
+                    try:
+                        os.replace(tmp_path, data_filename)
+                        break
+                    except PermissionError:
+                        if _attempt == 9:
+                            raise
+                        time.sleep(0.1)
                 try:
-                    os.fsync(data_file.fileno())
-                except OSError:
-                    pass
-            os.replace(tmp_path, data_filename)
-            if str(data_filename).endswith("last_workspace.json"):
+                    with open(data_filename, "r", encoding="utf-8") as _post:
+                        json.load(_post)
+                except (OSError, json.JSONDecodeError, ValueError) as _post_err:
+                    print(f"[ERROR] Post-write validation failed: {_post_err}")
+                    _restored = False
+                    for _src in (bak_path, bak2_path):
+                        if not os.path.exists(_src):
+                            continue
+                        try:
+                            with open(_src, "r", encoding="utf-8") as _src_f:
+                                _src_content = _src_f.read()
+                            json.loads(_src_content)
+                            with open(data_filename, "w", encoding="utf-8") as _dst_f:
+                                _dst_f.write(_src_content)
+                            print(f"[WARN] Restored workspace from {_src}")
+                            _restored = True
+                            break
+                        except (OSError, json.JSONDecodeError, ValueError) as _rst_err:
+                            print(f"[ERROR] Restore from {_src} failed: {_rst_err}")
+                    if not _restored:
+                        raise
+            if _is_last_ws:
                 print(f"[INFO] Last workspace saved to: {data_filename}")
             else:
                 common_widget_actions.create_and_show_toast_message(
@@ -1507,10 +1567,7 @@ def save_current_workspace(
             except OSError:
                 pass
             print(f"[ERROR] Failed to save workspace {data_filename}: {e}")
-            if not (
-                isinstance(data_filename, str)
-                and data_filename.endswith("last_workspace.json")
-            ):
+            if not _is_last_ws:
                 common_widget_actions.create_and_show_messagebox(
                     main_window,
                     "Save Error",
@@ -1532,16 +1589,13 @@ def purge_unused_kv_maps(main_window: "MainWindow"):
     )
     kv_data_dir = main_window.project_root_path / "model_assets" / "reference_kv_data"
 
-    # 1. Load registry safely, releasing lock immediately for UI interaction
     with _KV_REGISTRY_LOCK:
         registry = _load_registry(registry_path)
 
-    # 2. Extract unique parent file paths
     unique_parent_paths = set()
     for paths in registry.values():
         unique_parent_paths.update(paths)
 
-    # 3. Check for missing parent files
     missing_paths = [p for p in unique_parent_paths if not Path(p).exists()]
     paths_to_remove = set()
 
@@ -1559,24 +1613,20 @@ def purge_unused_kv_maps(main_window: "MainWindow"):
         if reply == QtWidgets.QMessageBox.Yes:
             paths_to_remove.add(missing_path)
 
-    # 4. Process Registry Removals and Registered File Deletions
     files_deleted_count = 0
     registry_modified = False
     keys_to_delete = []
 
     for kv_filename, paths in registry.items():
         original_len = len(paths)
-        # Keep only paths that the user did NOT mark for removal
         registry[kv_filename] = [p for p in paths if p not in paths_to_remove]
 
         if len(registry[kv_filename]) != original_len:
             registry_modified = True
 
-        # If the K/V map is no longer referenced by ANY valid workspace/job
         if not registry[kv_filename]:
             keys_to_delete.append(kv_filename)
 
-    # Physically delete unreferenced hashed files
     for kv_filename in keys_to_delete:
         pt_path = kv_data_dir / kv_filename
         try:
@@ -1587,12 +1637,9 @@ def purge_unused_kv_maps(main_window: "MainWindow"):
         except Exception as e:
             print(f"[ERROR] Failed to delete {kv_filename}: {e}")
 
-        # Remove from registry map
         del registry[kv_filename]
         registry_modified = True
 
-    # 5. Check for Legacy/Unregistered Files
-    # This cleans up the hundreds of old files you generated before we added hashing
     unregistered_pt_files = []
     if kv_data_dir.exists():
         for pt_file in kv_data_dir.glob("*.pt"):
@@ -1618,7 +1665,6 @@ def purge_unused_kv_maps(main_window: "MainWindow"):
                 except Exception as e:
                     print(f"[ERROR] Failed to delete {pt_file.name}: {e}")
 
-    # 6. Save Updated Registry Safely
     if registry_modified:
         with _KV_REGISTRY_LOCK:
             try:
@@ -1627,7 +1673,6 @@ def purge_unused_kv_maps(main_window: "MainWindow"):
             except IOError as e:
                 print(f"[ERROR] Failed to write updated KV registry: {e}")
 
-    # 7. Final Notification
     total_deleted = files_deleted_count + legacy_files_deleted
     if total_deleted > 0:
         common_widget_actions.create_and_show_messagebox(
