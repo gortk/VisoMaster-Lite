@@ -47,6 +47,16 @@ class TimelineSeekSlider(QtWidgets.QSlider):
         self._brush_playhead_normal = QtGui.QBrush(QtGui.QColor("white"))
         self._brush_playhead_provisional = QtGui.QBrush(QtGui.QColor("#e5c07b"))
         self._bracket_font = QtGui.QFont("Arial", 16, QtGui.QFont.Bold)
+        self._pen_segment = QtGui.QPen(QtGui.QColor("#9c27b0"), 1)
+        self._brush_segment = QtGui.QBrush(QtGui.QColor(156, 39, 176, 90))
+        self._pen_segment_recording = QtGui.QPen(QtGui.QColor("#4caf50"), 1)
+        self._brush_segment_recording = QtGui.QBrush(QtGui.QColor(76, 175, 80, 90))
+        self._pen_segment_exclude = QtGui.QPen(QtGui.QColor("#e8483c"), 1)
+        self._brush_segment_exclude = QtGui.QBrush(QtGui.QColor(232, 72, 60, 90))
+        self._pen_segment_drag = QtGui.QPen(QtGui.QColor("#9c27b0"), 1, QtCore.Qt.PenStyle.DashLine)
+        self._brush_segment_drag = QtGui.QBrush(QtGui.QColor(156, 39, 176, 60))
+        self._drag_start_frame = None
+        self._drag_current_frame = None
 
     def setup(self, main_window: "MainWindow"):
         """Injects the main window dependency after UI creation."""
@@ -54,6 +64,8 @@ class TimelineSeekSlider(QtWidgets.QSlider):
         self.valueChanged.connect(self.trigger_check)
         self.valueChanged.connect(self._auto_scroll_viewport)
         QtCore.QTimer.singleShot(500, self.bind_provisional_events)
+        self.setContextMenuPolicy(QtCore.Qt.ContextMenuPolicy.CustomContextMenu)
+        self.customContextMenuRequested.connect(self._show_segment_context_menu)
 
     def setValue(self, value: int):
         """Override native setValue to catch programmatic updates even when signals are blocked."""
@@ -227,6 +239,80 @@ class TimelineSeekSlider(QtWidgets.QSlider):
     def trigger_check(self, *args, **kwargs):
         QtCore.QTimer.singleShot(150, self.check_provisional_changes)
 
+    def _segment_creation_active(self) -> bool:
+        return bool(getattr(self.main_window, "segment_creation_mode", False))
+
+    def _frame_for_x(self, x: float) -> int:
+        style = self.style()
+        opt = QtWidgets.QStyleOptionSlider()
+        self.initStyleOption(opt)
+        groove = style.subControlRect(
+            QtWidgets.QStyle.ComplexControl.CC_Slider,
+            opt,
+            QtWidgets.QStyle.SubControl.SC_SliderGroove,
+        )
+        if groove.width() <= 0:
+            return self.minimum()
+        ratio = (x - groove.left()) / groove.width()
+        ratio = min(max(ratio, 0.0), 1.0)
+        return int(self.minimum() + ratio * (self.maximum() - self.minimum()))
+
+    def _segment_at_x(self, x: float):
+        if self.main_window is None:
+            return None
+        segments = getattr(self.main_window, "segments", [])
+        if not segments:
+            return None
+        frame = self._frame_for_x(x)
+        for i, seg in enumerate(segments):
+            if seg["start"] <= frame <= seg["end"]:
+                return i
+        return None
+
+    def mousePressEvent(self, event):
+        if self._segment_creation_active() and event.button() == QtCore.Qt.MouseButton.LeftButton:
+            frame = self._frame_for_x(event.position().x())
+            self._drag_start_frame = frame
+            self._drag_current_frame = frame
+            self.update()
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if self._segment_creation_active() and self._drag_start_frame is not None:
+            self._drag_current_frame = self._frame_for_x(event.position().x())
+            self.update()
+            event.accept()
+            return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if self._segment_creation_active() and self._drag_start_frame is not None and event.button() == QtCore.Qt.MouseButton.LeftButton:
+            end_frame = self._frame_for_x(event.position().x())
+            start = min(self._drag_start_frame, end_frame)
+            end = max(self._drag_start_frame, end_frame)
+            self._drag_start_frame = None
+            self._drag_current_frame = None
+            if end - start >= 1 and self.main_window is not None:
+                from app.ui.widgets.actions import video_control_actions
+                video_control_actions.add_segment(self.main_window, start, end)
+            self.update()
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
+
+    def _show_segment_context_menu(self, pos):
+        if self.main_window is None:
+            return
+        idx = self._segment_at_x(pos.x())
+        if idx is None:
+            return
+        from app.ui.widgets.actions import video_control_actions
+        video_control_actions.show_segment_context_menu(
+            self.main_window, idx, self.mapToGlobal(pos)
+        )
+
     def bind_provisional_events(self):
         if hasattr(self.main_window, "parameter_widgets"):
             for name, widget in self.main_window.parameter_widgets.items():
@@ -367,35 +453,43 @@ class TimelineSeekSlider(QtWidgets.QSlider):
             painter.setBrush(self._brush_playhead_normal)
         painter.drawRect(handle_rect)
 
-        # 6. Job Start/End Brackets
-        painter.setFont(self._bracket_font)
-        font_metrics = painter.fontMetrics()
-
-        # Calculate exactly how much space the bracket needs
-        bracket_width = font_metrics.horizontalAdvance("[") + 4
-        bracket_height = font_metrics.height()
-
-        # Center the bounding box vertically around the groove
-        bracket_top_y = int(groove_y - (bracket_height / 2))
-
-        for start_frame, end_frame in self.main_window.job_marker_pairs:
-            if start_frame is not None:
-                start_x = marker_x_for_value(int(start_frame))
-                # Create a strict bounding box to draw inside
-                rect = QtCore.QRect(
-                    int(start_x - 6), bracket_top_y, bracket_width, bracket_height
+        # 6. Segments
+        segments = getattr(self.main_window, "segments", [])
+        if segments:
+            seg_top = groove_rect.top()
+            seg_height = groove_rect.bottom() - groove_rect.top()
+            for seg in segments:
+                kind = seg.get("kind", "normal")
+                if kind == "recording":
+                    pen, brush = self._pen_segment_recording, self._brush_segment_recording
+                elif kind == "exclude":
+                    pen, brush = self._pen_segment_exclude, self._brush_segment_exclude
+                else:
+                    pen, brush = self._pen_segment, self._brush_segment
+                painter.setPen(pen)
+                painter.setBrush(brush)
+                start_x = marker_x_for_value(int(seg["start"]))
+                end_x = marker_x_for_value(int(seg["end"]))
+                painter.drawRect(
+                    QtCore.QRect(int(start_x), seg_top, max(1, int(end_x - start_x)), seg_height)
                 )
-                painter.setPen(self._pen_bracket_start)
-                painter.drawText(rect, QtCore.Qt.AlignmentFlag.AlignCenter, "[")
 
-            if end_frame is not None:
-                end_x = marker_x_for_value(int(end_frame))
-                # Create a strict bounding box to draw inside
-                rect = QtCore.QRect(
-                    int(end_x - 6), bracket_top_y, bracket_width, bracket_height
+        # 7. Drag preview
+        if self._drag_start_frame is not None and self._drag_current_frame is not None:
+            painter.setPen(self._pen_segment_drag)
+            painter.setBrush(self._brush_segment_drag)
+            start_x = marker_x_for_value(min(self._drag_start_frame, self._drag_current_frame))
+            end_x = marker_x_for_value(max(self._drag_start_frame, self._drag_current_frame))
+            painter.drawRect(
+                QtCore.QRect(
+                    int(start_x),
+                    groove_rect.top(),
+                    max(1, int(end_x - start_x)),
+                    groove_rect.bottom() - groove_rect.top(),
                 )
-                painter.setPen(self._pen_bracket_end)
-                painter.drawText(rect, QtCore.Qt.AlignmentFlag.AlignCenter, "]")
+            )
+
+        painter.setBrush(QtCore.Qt.BrushStyle.NoBrush)
 
 
 class ThumbnailExtractionWorker(QtCore.QThread):

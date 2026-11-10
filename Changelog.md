@@ -8,6 +8,7 @@
 - Even more patching done to prevent last_workspace.json from getting corrupted. I'm afraid this can 
   be a repeated theme as the issue seems rather random at the moment, so its difficult to test.
 - Enabling the "auto mouth expression" no longer freezes the app. 
+- New: no more markers. Now the user has a mouse dragging mechanic to create segments.
  
 
 ### 1.0.4

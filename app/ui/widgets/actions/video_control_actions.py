@@ -278,242 +278,67 @@ def set_up_timeline_zoom(main_window: "MainWindow"):
 
     zoom_slider.valueChanged.connect(on_zoom_changed)
 
+def toggle_segment_creation_mode(main_window: "MainWindow", checked: bool):
+    main_window.segment_creation_mode = bool(checked)
+    if hasattr(main_window, "createSegmentButton"):
+        main_window.createSegmentButton.blockSignals(True)
+        main_window.createSegmentButton.setChecked(bool(checked))
+        main_window.createSegmentButton.blockSignals(False)
 
-def add_video_slider_marker(main_window: "MainWindow"):
-    """
-    Adds a standard parameter marker at the current slider position.
 
-    Requires a video to be loaded and at least one target face to be present.
-    Shows an error message box if either precondition is not met, or if a marker
-    already exists at that position.
-    """
-    if block_if_issue_scan_active(main_window, "add a marker"):
+def add_segment(main_window: "MainWindow", start: int, end: int):
+    if end <= start:
         return
-
-    if (
-        not isinstance(
-            main_window.selected_video_button, widget_components.TargetMediaCardButton
-        )
-        or main_window.selected_video_button.file_type != "video"
-    ):
-        common_widget_actions.create_and_show_messagebox(
-            main_window,
-            "Markers Not Available",
-            "Markers can only be used for videos!",
-            main_window.videoSeekSlider,
-        )
-        return
-
-    current_position = int(main_window.videoSeekSlider.value())
-
-    if not main_window.target_faces:
-        common_widget_actions.create_and_show_messagebox(
-            main_window,
-            "No Target Face Found",
-            "You need to have at least one target face to create a marker",
-            main_window.videoSeekSlider,
-        )
-    elif main_window.markers.get(current_position):
-        common_widget_actions.create_and_show_messagebox(
-            main_window,
-            "Marker Already Exists!",
-            "A Marker already exists for this position!",
-            main_window.videoSeekSlider,
-        )
-    else:
-        # Deepcopy both parameters and control to guarantee total memory
-        # isolation and prevent state bleeding across timeline boundaries.
-        control_snapshot = copy.deepcopy(main_window.control)
-
-        # Remove environment/output specific keys from the snapshot.
-        # These settings dictate global I/O state for the batch/render session
-        # and must never be tied to specific timeline frames.
-        keys_to_exclude = [
-            "OutputMediaFolder",
-            "OutputToTargetLocationToggle",
-            "PreserveOutputDirectoryStructureToggle",
-            "ClusterOutputBySourceToggle",
-        ]
-        for key in keys_to_exclude:
-            control_snapshot.pop(key, None)
-
-        add_marker(
-            main_window,
-            copy.deepcopy(main_window.parameters),
-            control_snapshot,
-            current_position,
-        )
+    new_start = int(start)
+    new_end = int(end)
+    kept = []
+    for seg in main_window.segments:
+        s, e = int(seg["start"]), int(seg["end"])
+        if e < new_start or s > new_end:
+            kept.append(seg)
+            continue
+        if s < new_start:
+            kept.append({"start": s, "end": new_start - 1, "kind": seg["kind"]})
+        if e > new_end:
+            kept.append({"start": new_end + 1, "end": e, "kind": seg["kind"]})
+    kept.append({"start": new_start, "end": new_end, "kind": "normal"})
+    kept.sort(key=lambda x: x["start"])
+    main_window.segments = kept
+    main_window.videoSeekSlider.update()
 
 
-def show_add_marker_menu(main_window: "MainWindow"):
-    """Shows a context menu for adding different types of markers."""
-    if block_if_issue_scan_active(main_window, "edit scan markers"):
-        return
-
-    if (
-        not isinstance(
-            main_window.selected_video_button, widget_components.TargetMediaCardButton
-        )
-        or main_window.selected_video_button.file_type != "video"
-    ):
-        common_widget_actions.create_and_show_messagebox(
-            main_window,
-            "Markers Not Available",
-            "Markers can only be used for videos!",
-            main_window.videoSeekSlider,
-        )
-        return
-
-    button = main_window.addMarkerButton
-    menu = QMenu(main_window)
-
-    # Action for standard marker
-    add_standard_action = menu.addAction("Add Standard Marker")
-    add_standard_action.triggered.connect(lambda: add_video_slider_marker(main_window))
-
-    menu.addSeparator()
-
-    # Determine if the next action should be adding a start or an end marker
-    can_add_start = True
-    can_add_end = False
-    if main_window.job_marker_pairs:
-        last_pair = main_window.job_marker_pairs[-1]
-        if last_pair[1] is None:  # Last pair is incomplete (start set, end not set)
-            can_add_start = False
-            can_add_end = True
-
-    # Action for job start marker
-    set_start_action = menu.addAction("Add Record Start Marker")
-    set_start_action.triggered.connect(lambda: set_job_start_frame(main_window))
-    set_start_action.setEnabled(can_add_start)
-
-    # Action for job end marker
-    set_end_action = menu.addAction("Add Record End Marker")
-    set_end_action.triggered.connect(lambda: set_job_end_frame(main_window))
-    set_end_action.setEnabled(can_add_end)
-
-    # Show the menu below the button
-    menu.exec(button.mapToGlobal(QPoint(0, button.height())))
-
-
-def set_job_start_frame(main_window: "MainWindow"):
-    """Adds a new job marker pair starting at the current slider position."""
-    if block_if_issue_scan_active(main_window, "add a record start marker"):
-        return
-
-    current_pos = int(main_window.videoSeekSlider.value())
-
-    # Basic validation: Ensure we are not adding a start if the last pair is incomplete
-    if main_window.job_marker_pairs and main_window.job_marker_pairs[-1][1] is None:
-        QtWidgets.QMessageBox.warning(
-            main_window,
-            "Invalid Action",
-            "Cannot add a new Start marker before completing the previous End marker.",
-        )
-        return
-
-    # Add the new start marker (end frame is initially None)
-    main_window.job_marker_pairs.append((current_pos, None))
-    main_window.videoSeekSlider.update()  # Trigger repaint to show the new marker
-    print(
-        f"[INFO] Job Start Marker added for pair {len(main_window.job_marker_pairs)} at Frame: {current_pos}"
-    )
-
-
-def set_job_end_frame(main_window: "MainWindow"):
-    """Sets the job end frame marker for the last incomplete pair."""
-    if block_if_issue_scan_active(main_window, "add a record end marker"):
-        return
-
-    current_pos = int(main_window.videoSeekSlider.value())
-
-    # Validation: Check if there's an incomplete pair to add an end to
-    if (
-        not main_window.job_marker_pairs
-        or main_window.job_marker_pairs[-1][1] is not None
-    ):
-        QtWidgets.QMessageBox.critical(
-            main_window,
-            "Error",
-            "Cannot set End marker without a preceding Start marker.",
-        )
-        return
-
-    last_pair_index = len(main_window.job_marker_pairs) - 1
-    start_frame = main_window.job_marker_pairs[last_pair_index][0]
-
-    # Validation: Check end frame is after start frame
-    if current_pos <= start_frame:
-        QtWidgets.QMessageBox.warning(
-            main_window,
-            "Invalid Position",
-            "Job end frame must be after the job start frame.",
-        )
-        return
-
-    # Update the last pair with the end frame
-    main_window.job_marker_pairs[last_pair_index] = (start_frame, current_pos)
-    main_window.videoSeekSlider.update()  # Trigger repaint to show the new marker
-    print(
-        f"[INFO] Job End Marker added for pair {last_pair_index + 1} at Frame: {current_pos}"
-    )
-
-
-def remove_video_slider_marker(main_window: "MainWindow"):
-    """
-    Removes the marker (standard or job-bracket) at the current slider position.
-
-    If the position belongs to a job marker pair, the entire pair is removed.
-    If no marker exists at the position, an error message box is shown.
-    """
-    if block_if_issue_scan_active(main_window, "remove a marker"):
-        return
-
-    if (
-        not isinstance(
-            main_window.selected_video_button, widget_components.TargetMediaCardButton
-        )
-        or main_window.selected_video_button.file_type != "video"
-    ):
-        common_widget_actions.create_and_show_messagebox(
-            main_window,
-            "Markers Not Available",
-            "Markers can only be used for videos!",
-            main_window.videoSeekSlider,
-        )
-        return
-
-    current_position = int(main_window.videoSeekSlider.value())
-    pair_removed = False
-
-    removed_pair_indices = []
-    for i, (start_frame, end_frame) in enumerate(main_window.job_marker_pairs):
-        if start_frame == current_position or end_frame == current_position:
-            print(
-                f"[INFO] Removing Job Marker Pair {i + 1} ({start_frame}, {end_frame}) because marker found at position: {current_position}"
-            )
-            removed_pair_indices.append(i)
-            pair_removed = True
-
-    main_window.job_marker_pairs = [
-        pair
-        for i, pair in enumerate(main_window.job_marker_pairs)
-        if i not in removed_pair_indices
-    ]
-
-    if pair_removed:
+def set_segment_kind(main_window: "MainWindow", index: int, kind: str):
+    if 0 <= index < len(main_window.segments):
+        main_window.segments[index]["kind"] = kind
         main_window.videoSeekSlider.update()
-        return
 
-    if main_window.markers.get(current_position):
-        remove_marker(main_window, current_position)
-    else:
-        common_widget_actions.create_and_show_messagebox(
-            main_window,
-            "No Marker Found!",
-            "No Marker Found for this position!",
-            main_window.videoSeekSlider,
-        )
+
+def remove_segment(main_window: "MainWindow", index: int):
+    if 0 <= index < len(main_window.segments):
+        main_window.segments.pop(index)
+        main_window.videoSeekSlider.update()
+
+
+def show_segment_context_menu(main_window: "MainWindow", index: int, global_pos):
+    menu = QMenu(main_window)
+    menu.addAction(
+        "Normal segment",
+        partial(set_segment_kind, main_window, index, "normal"),
+    )
+    menu.addAction(
+        "Recording segment",
+        partial(set_segment_kind, main_window, index, "recording"),
+    )
+    menu.addAction(
+        "Exclude segment",
+        partial(set_segment_kind, main_window, index, "exclude"),
+    )
+    menu.addSeparator()
+    menu.addAction(
+        "Remove segment",
+        partial(remove_segment, main_window, index),
+    )
+    menu.exec(global_pos)
 
 
 def add_marker(
@@ -545,13 +370,10 @@ def move_slider_to_nearest_marker(main_window: "MainWindow", direction: str):
     new_position = None
     current_position = int(main_window.videoSeekSlider.value())
 
-    # Combine standard markers with all job start/end markers from pairs
     all_markers = set(main_window.markers.keys())
-    for start_frame, end_frame in main_window.job_marker_pairs:
-        if start_frame is not None:
-            all_markers.add(start_frame)
-        if end_frame is not None:
-            all_markers.add(end_frame)
+    for seg in getattr(main_window, "segments", []):
+        all_markers.add(int(seg["start"]))
+        all_markers.add(int(seg["end"]))
 
     if not all_markers:
         return  # No markers to navigate to
@@ -1450,19 +1272,15 @@ def run_issue_scan(main_window: "MainWindow"):
 
 
 def remove_face_parameters_and_control_from_markers(main_window: "MainWindow", face_id):
-    """
-    Removes all stored parameter entries for *face_id* from every marker.
-
-    If any marker's parameter dict becomes empty after the removal, all markers are
-    deleted because there is no longer any face data to track.
-    """
     for _, marker_data in main_window.markers.items():
         marker_data["parameters"].pop(
             face_id, None
-        )  # Use .pop with default to avoid KeyError
-        # If the parameters is empty, then there is no longer any marker to be set for any target face
+        )
         if not marker_data["parameters"]:
-            delete_all_markers(main_window)
+            main_window.videoSeekSlider.markers = set()
+            main_window.videoSeekSlider.markers_sorted = []
+            main_window.videoSeekSlider.update()
+            main_window.markers.clear()
             break
 
 
@@ -1477,9 +1295,8 @@ def remove_all_markers(main_window: "MainWindow"):
     main_window.markers.clear()
     set_issue_frames_by_face(main_window, {})
     set_dropped_frames(main_window, [])
-    if main_window.job_marker_pairs:
-        print("[INFO] Clearing job marker pairs.")
-        main_window.job_marker_pairs.clear()
+    if getattr(main_window, "segments", None):
+        main_window.segments.clear()
 
 
 def advance_video_slider_by_n_frames(main_window: "MainWindow", n=None):
@@ -1581,6 +1398,7 @@ def delete_all_markers(main_window: "MainWindow"):
     main_window.videoSeekSlider.dropped_markers_sorted = []
     main_window.videoSeekSlider.update()
     main_window.markers.clear()
+    main_window.segments.clear()
     main_window.issue_frames_by_face.clear()
     main_window.issue_frames.clear()
     main_window.dropped_frames.clear()
@@ -1855,7 +1673,18 @@ def record_video(main_window: "MainWindow", checked: bool):
             main_window.buttonMediaRecord.setChecked(False)
             return
 
-        marker_pairs = main_window.job_marker_pairs
+        segments = [
+            (int(s["start"]), int(s["end"]))
+            for s in getattr(main_window, "segments", [])
+            if s.get("kind") == "recording" and s["end"] > s["start"]
+        ]
+        if not segments:
+            segments = [
+                (int(s["start"]), int(s["end"]))
+                for s in getattr(main_window, "segments", [])
+                if s.get("kind") == "normal" and s["end"] > s["start"]
+            ]
+        marker_pairs = segments
 
         if not marker_pairs or (
             is_batch_processing and video_processor.file_type == "video"

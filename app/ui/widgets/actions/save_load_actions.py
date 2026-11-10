@@ -1017,12 +1017,24 @@ def _workspace_after_inputs(main_window, data, data_filename):
 
     def _restore_markers_controls():
         video_control_actions.remove_all_markers(main_window)
-        main_window.job_marker_pairs = data.get("job_marker_pairs", [])
-        if not main_window.job_marker_pairs:
-            job_start_frame = data.get("job_start_frame", None)
-            job_end_frame = data.get("job_end_frame", None)
-            if job_start_frame is not None:
-                main_window.job_marker_pairs.append((job_start_frame, job_end_frame))
+        loaded_segments = data.get("segments")
+        if not isinstance(loaded_segments, list):
+            loaded_segments = []
+            for pair in data.get("job_marker_pairs", []) or []:
+                try:
+                    s, e = int(pair[0]), int(pair[1])
+                except (TypeError, ValueError, IndexError):
+                    continue
+                if s < e:
+                    loaded_segments.append({"start": s, "end": e, "kind": "normal"})
+            if not loaded_segments:
+                s = data.get("job_start_frame", None)
+                e = data.get("job_end_frame", None)
+                if s is not None and e is not None and int(s) < int(e):
+                    loaded_segments = [
+                        {"start": int(s), "end": int(e), "kind": "normal"}
+                    ]
+        main_window.segments = loaded_segments
         raw_markers = data.get("markers", {})
         sanitized_markers_dict = sanitize_markers_dictionary(main_window, raw_markers)
         data["markers"] = convert_markers_to_supported_type(
@@ -1485,7 +1497,7 @@ def save_current_workspace(
             for face_id, frames in main_window.issue_frames_by_face.items()
         },
         "dropped_frames": sorted(main_window.dropped_frames),
-        "job_marker_pairs": main_window.job_marker_pairs,
+        "segments": getattr(main_window, "segments", []),
         "last_target_media_folder_path": main_window.last_target_media_folder_path,
         "last_input_media_folder_path": main_window.last_input_media_folder_path,
         "loaded_embedding_filename": main_window.loaded_embedding_filename,

@@ -237,85 +237,32 @@ class IssueScanner:
         return None
 
     def _get_issue_scan_ranges(self) -> List[Tuple[int, int]]:
-        """Converts user-defined UI start/end points into concrete frame tuple ranges."""
         max_frame = int(self.max_frame_number)
         scan_ranges: List[Tuple[int, int]] = []
-        open_start_frame: Optional[int] = None
-
-        for start_frame, end_frame in self.main_window.job_marker_pairs:
-            if start_frame is None:
+        for seg in getattr(self.main_window, "segments", []):
+            if seg.get("kind") == "exclude":
                 continue
-            normalized_start = int(start_frame)
-            if end_frame is None:
-                open_start_frame = normalized_start
-                continue
-
-            normalized_end = int(end_frame)
-            if normalized_end >= normalized_start:
-                scan_ranges.append((normalized_start, normalized_end))
-
-        if open_start_frame is not None and open_start_frame <= max_frame:
-            scan_ranges.append((open_start_frame, max_frame))
-
+            s = int(seg["start"])
+            e = int(seg["end"])
+            if e >= s and s <= max_frame:
+                scan_ranges.append((s, min(e, max_frame)))
         if scan_ranges:
             return misc_helpers.normalize_issue_scan_ranges(scan_ranges)
-
         return [(0, max_frame)]
+
 
     def describe_issue_scan_scope(
         self, scan_ranges: Optional[List[Tuple[int, int]]] = None
     ) -> str:
-        """Returns a human-readable string defining the scope of the scan for the UI progress dialog."""
         scan_ranges = scan_ranges or self._get_issue_scan_ranges()
         max_frame = int(self.max_frame_number)
-        if not getattr(self.main_window, "job_marker_pairs", []):
+        if not getattr(self.main_window, "segments", []):
             return "Scanning full clip"
         if scan_ranges == [(0, max_frame)]:
             return "Scanning full clip"
-
-        open_start_frames = [
-            int(start_frame)
-            for start_frame, end_frame in self.main_window.job_marker_pairs
-            if start_frame is not None and end_frame is None
-        ]
-        has_open_start = bool(open_start_frames)
-        open_start_frame = min(open_start_frames) if open_start_frames else None
-
         if len(scan_ranges) == 1:
-            start_frame, end_frame = scan_ranges[0]
-            if (
-                has_open_start
-                and end_frame == max_frame
-                and open_start_frame is not None
-            ):
-                if start_frame < open_start_frame:
-                    return f"Scanning 1 marked range and record start frame {open_start_frame} to end"
-                if open_start_frame > 0:
-                    return f"Scanning from record start frame {open_start_frame}"
             return "Scanning 1 marked range"
-
-        effective_complete_segments = len(scan_ranges)
-        effective_open_start_frame: Optional[int] = None
-        if (
-            has_open_start
-            and scan_ranges[-1][1] == max_frame
-            and open_start_frame is not None
-        ):
-            effective_open_start_frame = open_start_frame
-            effective_complete_segments -= 1
-
-        if effective_complete_segments and effective_open_start_frame is not None:
-            range_label = "range" if effective_complete_segments == 1 else "ranges"
-            return (
-                f"Scanning {effective_complete_segments} marked {range_label} "
-                f"and record start frame {effective_open_start_frame} to end"
-            )
-        if effective_complete_segments:
-            range_label = "range" if effective_complete_segments == 1 else "ranges"
-            return f"Scanning {effective_complete_segments} marked {range_label}"
-        if effective_open_start_frame is not None:
-            return f"Scanning from record start frame {effective_open_start_frame}"
-        return "Scanning full clip"
+        return f"Scanning {len(scan_ranges)} marked ranges"
 
     @staticmethod
     def _compute_longest_issue_run(issue_frames: list[int]) -> int:

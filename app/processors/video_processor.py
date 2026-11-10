@@ -706,11 +706,11 @@ class VideoProcessor(QObject):
         if not self.recording and self.main_window.control.get(
             "VideoPlaybackSegmentsToggle", False
         ):
-            raw_markers = getattr(self.main_window, "job_marker_pairs", [])
+            raw_segments = getattr(self.main_window, "segments", [])
             valid_pairs = []
-            for pair in raw_markers:
-                if pair[1] is not None and pair[0] < pair[1]:
-                    valid_pairs.append((int(pair[0]), int(pair[1])))
+            for seg in raw_segments:
+                if seg.get("kind") == "normal" and int(seg["start"]) < int(seg["end"]):
+                    valid_pairs.append((int(seg["start"]), int(seg["end"])))
 
             if valid_pairs:
                 self.segments_to_process = sorted(valid_pairs)

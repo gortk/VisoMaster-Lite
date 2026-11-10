@@ -185,9 +185,8 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
 
         self.loaded_embedding_filename: str = ""
 
-        # List of (start_frame, end_frame) tuples for job segments
-        # end_frame can be None if a start marker is set but the end is not yet set.
-        self.job_marker_pairs: list[tuple[int, int | None]] = []
+        self.segments: list[dict] = []
+        self.segment_creation_mode = False
 
         self.last_target_media_folder_path = ""
         self.last_input_media_folder_path = ""
@@ -342,13 +341,6 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
             partial(video_control_actions.rewind_video_slider_by_n_frames, self)
         )
 
-        # JOB MANAGER changes addMarkerButton connection
-        self.addMarkerButton.clicked.connect(
-            partial(video_control_actions.show_add_marker_menu, self)
-        )
-        self.removeMarkerButton.clicked.connect(
-            partial(video_control_actions.remove_video_slider_marker, self)
-        )
         self.nextMarkerButton.clicked.connect(
             partial(video_control_actions.move_slider_to_next_nearest_marker, self)
         )
@@ -356,6 +348,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
             partial(video_control_actions.move_slider_to_previous_nearest_marker, self)
         )
         video_control_actions.add_scan_review_controls(self)
+        self._install_segment_controls()
         video_control_actions.initialize_media_button_icons(self)
 
         # Set up videoSeekLineEdit and add the event filter to handle changes
@@ -1391,8 +1384,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
             self.frameAdvanceButton,
         ]
         marker_buttons = [
-            self.addMarkerButton,
-            self.removeMarkerButton,
+            self.createSegmentButton,
             self.previousMarkerButton,
             self.nextMarkerButton,
         ]
@@ -1417,7 +1409,15 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
                     button.setIconSize(icon_size)
 
         style(transport_buttons, lambda _b: max(32, transport_icon_size.width() + 18), transport_icon_size)
-        style(marker_buttons, lambda _b: max(30, marker_icon_size.width() + 16), marker_icon_size)
+        style(
+            [self.createSegmentButton],
+            lambda b: QtGui.QFontMetrics(b.font()).horizontalAdvance(b.text()) + 28,
+        )
+        style(
+            [self.previousMarkerButton, self.nextMarkerButton],
+            lambda _b: max(30, marker_icon_size.width() + 16),
+            marker_icon_size,
+        )
         style(icon_utility_buttons, lambda _b: max(30, utility_icon_size.width() + 16), utility_icon_size)
         self.liveSoundButton.setIconSize(QtCore.QSize(24, 24))
         style(
@@ -1501,8 +1501,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
         self.mediaControlsUtilityLayout = self.mediaControlsMainLayout
 
         for button in [
-            self.addMarkerButton,
-            self.removeMarkerButton,
+            self.createSegmentButton,
             self.previousMarkerButton,
             self.nextMarkerButton,
             self.frameRewindButton,
@@ -1650,6 +1649,21 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
             mask_checkbox.hide()
 
         self._compare_mask_toggle_buttons_installed = True
+
+    def _install_segment_controls(self):
+        if getattr(self, "_segment_controls_installed", False):
+            return
+        self.addMarkerButton.hide()
+        self.removeMarkerButton.hide()
+        self.createSegmentButton = QtWidgets.QPushButton("Create Segment", self.mediaLayout)
+        self.createSegmentButton.setCheckable(True)
+        self.createSegmentButton.setFlat(True)
+        self.createSegmentButton.setToolTip("Drag on the timeline to create a segment")
+        self.createSegmentButton.toggled.connect(
+            partial(video_control_actions.toggle_segment_creation_mode, self)
+        )
+        self._segment_controls_installed = True
+
 
     def _set_panel_visibility(self, panel_key: str, checked: bool):
         """Apply panel visibility from the visible View menu actions."""
