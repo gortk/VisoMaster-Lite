@@ -47,7 +47,11 @@ class PipelineProcessor:
         self._kernel_sobel_y: torch.Tensor | None = None
 
         self._mouth_action_score: float = 0.0
-
+        self._auto_restorer_ema: dict[str, tuple[float, int]] = {}
+        self._donor_guard_alpha_cap: dict[str, float] = {}
+        self._donor_guard_last_check_frame: dict[str, int] = {}
+        self._sharpness_target_cache: dict[tuple[str, int], float] = {}
+        
     @property
     def kernel_lap(self) -> torch.Tensor:
         """Lazy initialization of the Laplacian kernel to ensure Thread-Safe CUDA allocation."""
@@ -1388,29 +1392,10 @@ class PipelineProcessor:
         debug: bool,
         debug_info: dict,
         slot_id: int,
+        face_key: str | None = None,
+        region_weights: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        """
-        FW-QUAL-01/02: Shared helper for Restoration-2 auto-blend logic.
 
-        Applies auto sharpness-driven alpha blending (or Gaussian blur fallback)
-        between `swap_original2` (pre-restorer) and `swap2` (post-restorer).
-        When auto mode is disabled, applies a simple weighted blend.
-
-        Args:
-            swap:             Current swap tensor (not used directly, but returned as output).
-            swap2:            Restorer output tensor.
-            swap_original2:   Snapshot of swap *before* restorer was applied.
-            original_face_512: Original face tensor (used by face_restorer_auto).
-            mask_forcalc_512: Mask tensor for sharpness calculation.
-            parameters:       Per-face parameters dict.
-            tform_scale:      Similarity-transform scale (used as scale_factor).
-            debug:            Whether debug mode is active.
-            debug_info:       Mutable dict for debug annotations; key is f'Restore2_{slot_id}'.
-            slot_id:          Restorer slot identifier (2 for both callers).
-
-        Returns:
-            Updated swap tensor after blending.
-        """
         debug_key = f"Restore2_{slot_id}"
         if parameters["FaceRestorerAutoEnable2Toggle"]:
             alpha_restorer2 = float(parameters["FaceRestorerBlend2Slider"]) / 100.0
@@ -1435,6 +1420,8 @@ class PipelineProcessor:
                 automasktoggle2,
                 automaskadjust2,
                 automaskblur2,
+                face_key=face_key,
+                region_weights=region_weights,
             )
 
             if blur_value2 > 0:
@@ -1819,6 +1806,7 @@ class PipelineProcessor:
         is_perspective_crop: bool = False,
         kv_map: dict[str, Any] | None = None,
         yawnet_deg: float | None = None,
+        face_key: str | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
         """
         Core function for face swapping. Handles:
@@ -2341,6 +2329,21 @@ class PipelineProcessor:
         ones_column_ref = np.ones((kps_5.shape[0], 1), dtype=np.float32)
         kps_ref = np.hstack([kps_5, ones_column_ref]) @ M_ref.T
 
+        region_weights_for_restorer = None
+        if (
+            parameters["FaceRestorerEnableToggle"]
+            or parameters["FaceRestorerEnable2Toggle"]
+        ) and (
+            parameters.get("FaceRestorerAutoEnableToggle", False)
+            or parameters.get("FaceRestorerAutoEnable2Toggle", False)
+        ):
+            region_weights_for_restorer = self._build_region_weights_from_kps(
+                kps_ref,
+                swap.shape[1],
+                swap.shape[2],
+                self.worker.models_processor.device,
+            )
+
         swap = torch.clamp(swap, 0.0, 255.0)
 
         # --- FACE EDITING (Beginning) ---
@@ -2763,7 +2766,57 @@ class PipelineProcessor:
                 automasktoggle,
                 automaskadjust,
                 automaskblur,
+                face_key=face_key,
             )
+
+            if (
+                valid_s_e is not None
+                and face_key is not None
+                and blur_value == 0
+                and not isinstance(alpha_auto, torch.Tensor)
+                and float(alpha_auto) >= 0.20
+                and not self.worker.is_view_face_mask
+                and not self.worker.is_view_face_compare
+            ):
+                _last_check = self._donor_guard_last_check_frame.get(face_key, -1)
+                _should_check = (
+                    face_key not in self._donor_guard_alpha_cap
+                    or (
+                        self.worker.frame_number % 5 == 0
+                        and self.worker.frame_number != _last_check
+                    )
+                )
+                if _should_check:
+                    _arcface_for_guard = (
+                        self.worker.function_worker.get_arcface_model(swapper_model)
+                    )
+                    _a_top = float(alpha_auto)
+                    _a_low = max(0.0, _a_top - 0.15)
+                    _cand_top = (
+                        swap_restorecalc.float() * _a_top
+                        + swap_original.float() * (1.0 - _a_top)
+                    ).clamp_(0, 255).to(torch.uint8)
+                    _cand_low = (
+                        swap_restorecalc.float() * _a_low
+                        + swap_original.float() * (1.0 - _a_low)
+                    ).clamp_(0, 255).to(torch.uint8)
+                    _sim_top = self._donor_similarity(
+                        _cand_top, kps_ref, valid_s_e, _arcface_for_guard
+                    )
+                    _sim_low = self._donor_similarity(
+                        _cand_low, kps_ref, valid_s_e, _arcface_for_guard
+                    )
+                    self._donor_guard_alpha_cap[face_key] = (
+                        _a_low if _sim_low > _sim_top + 0.5 else _a_top
+                    )
+                    self._donor_guard_last_check_frame[face_key] = (
+                        self.worker.frame_number
+                    )
+                _cap = self._donor_guard_alpha_cap.get(face_key)
+                if _cap is not None and float(alpha_auto) > _cap:
+                    alpha_auto = _cap
+                    if debug:
+                        debug_info["DonorPeak"] = f": capped at {_cap * 100:.1f}"
 
             if blur_value > 0:
                 k_size = int(2 * blur_value + 1)
@@ -3390,12 +3443,13 @@ class PipelineProcessor:
             )
 
         # --- RESTORATION 2 (END) ---
-        # FW-QUAL-01/02: duplicated ~60-line block extracted to _apply_restorer_with_auto
         if (
             parameters["FaceRestorerEnable2Toggle"]
-            and parameters["FaceRestorerEnable2EndToggle"]
+            and not parameters["FaceRestorerEnable2EndToggle"]
         ):
-            swap_original2 = swap.clone()
+            swap_original2 = (
+                swap_original.clone() if swap_original is not None else swap.clone()
+            )
             swap2 = self.worker.function_worker.apply_facerestorer(
                 swap,
                 parameters["FaceRestorerDetType2Selection"],
@@ -3983,10 +4037,10 @@ class PipelineProcessor:
 
     def face_restorer_auto(
         self,
-        original_face_512,  # [3,H,W], float in [0..255]
-        swap_original,  # [3,H,W]
-        swap,  # [3,H,W]
-        alpha,  # initial scalar alpha (ignored; we binary search below)
+        original_face_512,
+        swap_original,
+        swap,
+        alpha,
         adjust_sharpness,
         scale_factor,
         debug,
@@ -3994,30 +4048,107 @@ class PipelineProcessor:
         alpha_map_enable: bool = False,
         alpha_map_strength: float = 0.5,
         alpha_map_blur: int = 7,
+        face_key: str | None = None,
+        region_weights: torch.Tensor | None = None,
     ):
-        """Auto-Restorer: Blends between restored and original image based on sharpness."""
-        # Baseline sharpness of original
-        scores_original = self.sharpness_score(original_face_512)
+        raw_combined: float | None = None
+        if face_key is not None:
+            _cache_key = (face_key, self.worker.frame_number)
+            raw_combined = self._sharpness_target_cache.get(_cache_key)
+        else:
+            _cache_key = None
+        if raw_combined is None:
+            raw_combined = self.sharpness_score(
+                original_face_512, weight=region_weights
+            )["combined"].item()
+            if _cache_key is not None:
+                if len(self._sharpness_target_cache) >= 64:
+                    self._sharpness_target_cache.pop(
+                        next(iter(self._sharpness_target_cache))
+                    )
+                self._sharpness_target_cache[_cache_key] = raw_combined
+        scale_adjust = max(0.5, min(float(scale_factor), 2.5))
         score_new_original = (
-            scores_original["combined"].item() * 100 + adjust_sharpness / 10.0
+            raw_combined * 100 + adjust_sharpness / 10.0 * scale_adjust
         )
+        tolerance = max(0.15, min(0.75, score_new_original * 0.025))
 
-        # Binary search for scalar alpha
-        alpha = 1.0
+        swap_f = swap.float() / 255.0
+        orig_f = swap_original.float() / 255.0
+        gray_s = swap_f.mean(dim=0, keepdim=True).unsqueeze(0)
+        gray_o = orig_f.mean(dim=0, keepdim=True).unsqueeze(0)
+
+        L_s = F.conv2d(gray_s, self.kernel_lap, padding=1).squeeze()
+        L_o = F.conv2d(gray_o, self.kernel_lap, padding=1).squeeze()
+        L_s2 = L_s.pow(2)
+        L_o2 = L_o.pow(2)
+        L_so = L_s * L_o
+
+        if region_weights is not None:
+            _w = region_weights.float()
+            if _w.dim() == 3:
+                _w = _w.squeeze(0)
+            _wsum = _w.sum().clamp(min=1e-6)
+            E_s = (L_s * _w).sum() / _wsum
+            E_o = (L_o * _w).sum() / _wsum
+            E_s2 = (L_s2 * _w).sum() / _wsum
+            E_o2 = (L_o2 * _w).sum() / _wsum
+            E_so = (L_so * _w).sum() / _wsum
+        else:
+            _w = None
+            _wsum = None
+            E_s = L_s.mean()
+            E_o = L_o.mean()
+            E_s2 = L_s2.mean()
+            E_o2 = L_o2.mean()
+            E_so = L_so.mean()
+
+        Gx_s = F.conv2d(gray_s, self.kernel_sobel_x, padding=1).squeeze()
+        Gy_s = F.conv2d(gray_s, self.kernel_sobel_y, padding=1).squeeze()
+        Gx_o = F.conv2d(gray_o, self.kernel_sobel_x, padding=1).squeeze()
+        Gy_o = F.conv2d(gray_o, self.kernel_sobel_y, padding=1).squeeze()
+        total_pixels = L_s.numel()
+        _comb_weight = 0.5
+        _tenengrad_thresh = 0.05
+
+        def combined_at(a: float) -> float:
+            E = a * E_s + (1.0 - a) * E_o
+            E2 = (
+                a * a * E_s2
+                + 2.0 * a * (1.0 - a) * E_so
+                + (1.0 - a) * (1.0 - a) * E_o2
+            )
+            var_lap = (E2 - E * E).clamp(min=0.0)
+            Gx = a * Gx_s + (1.0 - a) * Gx_o
+            Gy = a * Gy_s + (1.0 - a) * Gy_o
+            G = (Gx * Gx + Gy * Gy).sqrt()
+            strong_mask = (G > _tenengrad_thresh).float()
+            if _w is not None:
+                tt = (strong_mask * _w).sum() / _wsum
+            else:
+                tt = strong_mask.sum() / total_pixels
+            return (_comb_weight * var_lap + (1.0 - _comb_weight) * tt).item() * 100.0
+
+        prev_seed = (
+            self._auto_restorer_ema[face_key][0]
+            if face_key is not None and face_key in self._auto_restorer_ema
+            else None
+        )
+        if prev_seed is not None:
+            alpha_min = max(0.0, prev_seed - 0.15)
+            alpha_max = min(1.0, prev_seed + 0.15)
+            alpha = (alpha_min + alpha_max) / 2.0
+        else:
+            alpha_min, alpha_max = 0.0, 1.0
+            alpha = 1.0
         max_iterations = 7
-        alpha_min, alpha_max = 0.0, 1.0
-        tolerance = 0.5
         min_alpha_change = 0.05
         iteration = 0
         prev_alpha = alpha
         iteration_blur = 0
 
         while iteration < max_iterations:
-            swap2 = swap * alpha + swap_original * (1 - alpha)
-            swap2_masked = swap2.clone()
-
-            scores_swap = self.sharpness_score(swap2_masked)
-            score_new_swap = scores_swap["combined"].item() * 100
+            score_new_swap = combined_at(alpha)
             sharpness_diff = score_new_swap - score_new_original
 
             if abs(sharpness_diff) < tolerance:
@@ -4033,37 +4164,38 @@ class PipelineProcessor:
                 alpha_max = alpha
                 alpha = (alpha + alpha_min) / 2.0
 
-            # Very small alpha -> blur fallback on base
             if sharpness_diff >= 0 and alpha < 0.07:
                 prev_alpha = 0.0
-                base = swap_original
-                max_blur_strength = 10
-
-                # OPTIMIZATION: Replaced the list comprehension of GaussianBlur objects
-                # with direct functional calls to avoid iterative memory allocation.
-                for bs in range(0, max_blur_strength + 1):
-                    if bs == 0:
-                        swap2_blurred = v2.functional.gaussian_blur(
-                            base, kernel_size=[1, 1], sigma=[1e-6, 1e-6]
-                        )
+                if combined_at(0.0) <= score_new_original + tolerance:
+                    break
+                lo, hi = 0, 10
+                found_exact = False
+                while lo < hi:
+                    mid = (lo + hi + 1) // 2
+                    k_size = 2 * mid + 1
+                    s_val = float(max(mid, 1e-6))
+                    swap2_blurred = v2.functional.gaussian_blur(
+                        swap_original,
+                        kernel_size=[k_size, k_size],
+                        sigma=[s_val, s_val],
+                    )
+                    score_b = (
+                        self.sharpness_score(
+                            swap2_blurred, weight=region_weights
+                        )["combined"].item()
+                        * 100.0
+                    )
+                    diff_b = score_b - score_new_original
+                    if abs(diff_b) <= tolerance:
+                        iteration_blur = mid
+                        found_exact = True
+                        break
+                    if diff_b > 0:
+                        lo = mid
                     else:
-                        k_size = int(2 * bs + 1)
-                        s_val = float(max(bs, 1e-6))
-                        swap2_blurred = v2.functional.gaussian_blur(
-                            base, kernel_size=[k_size, k_size], sigma=[s_val, s_val]
-                        )
-
-                    scores_swap_b = self.sharpness_score(swap2_blurred)
-                    score_new_swap_b = scores_swap_b["combined"].item() * 100.0
-                    sharpness_diff_b = score_new_swap_b - score_new_original
-
-                    if sharpness_diff_b < 0:
-                        iteration_blur = 0 if bs == 0 else (bs - 1)
-                        break
-                    if abs(sharpness_diff_b) <= tolerance:
-                        iteration_blur = bs
-                        break
-                    iteration_blur = bs
+                        hi = mid - 1
+                if not found_exact:
+                    iteration_blur = lo
                 break
 
             if abs(prev_alpha - alpha) < min_alpha_change:
@@ -4075,11 +4207,11 @@ class PipelineProcessor:
             prev_alpha = alpha
             iteration += 1
 
-        # Per-pixel alpha map, derived from sharpness distribution
-        if alpha_map_enable and (prev_alpha > 0.0):
-            # Build the *final* composite (for a stable map), then sharpness map of it
-            swap_final = swap * prev_alpha + swap_original * (1 - prev_alpha)
+        if face_key is not None:
+            self._auto_restorer_ema[face_key] = (prev_alpha, iteration_blur)
 
+        if alpha_map_enable and (prev_alpha > 0.0):
+            swap_final = swap * prev_alpha + swap_original * (1 - prev_alpha)
             s_map = self.sharpness_map(
                 swap_final,
                 mask=swap_mask,
@@ -4089,8 +4221,6 @@ class PipelineProcessor:
                 if (alpha_map_blur and alpha_map_blur % 2 == 1)
                 else 0,
             )
-
-            # Mean sharpness inside mask (or global)
             if swap_mask is not None:
                 m = (
                     (swap_mask if swap_mask.dim() == 2 else swap_mask.squeeze(0))
@@ -4101,13 +4231,9 @@ class PipelineProcessor:
                 mu = (s_map * m).sum() / denom
             else:
                 mu = s_map.mean()
-
-            # Deviation map around mean, scale around prev_alpha
             dev = (s_map - mu).clamp(-1.0, 1.0)
             alpha_map = prev_alpha * (1.0 + alpha_map_strength * dev)
             alpha_map = alpha_map.clamp(0.0, 1.0)
-
-            # Keep outside-face area at scalar prev_alpha (if a mask is provided)
             if swap_mask is not None:
                 m = (
                     (swap_mask if swap_mask.dim() == 2 else swap_mask.squeeze(0))
@@ -4115,11 +4241,86 @@ class PipelineProcessor:
                     .to(alpha_map.device)
                 )
                 alpha_map = alpha_map * m + prev_alpha * (1.0 - m)
-
             return alpha_map.unsqueeze(0), iteration_blur
 
-        # Fallback: scalar like before
         return prev_alpha, iteration_blur
+
+    @staticmethod
+    @torch.no_grad()
+    def _build_region_weights_from_kps(
+        kps_ref: np.ndarray,
+        height: int,
+        width: int,
+        device: torch.device,
+    ) -> torch.Tensor:
+        eye_dist = float(np.linalg.norm(kps_ref[0] - kps_ref[1]))
+        if eye_dist < 1e-3:
+            return torch.ones((1, height, width), device=device)
+        mouth_dist = float(np.linalg.norm(kps_ref[3] - kps_ref[4]))
+        sigma_eye = max(eye_dist * 0.30, 3.0)
+        sigma_mouth = max(mouth_dist * 0.35, 3.0)
+
+        y = torch.arange(height, device=device, dtype=torch.float32).view(-1, 1)
+        x = torch.arange(width, device=device, dtype=torch.float32).view(1, -1)
+
+        def _gauss(cx, cy, s):
+            return torch.exp(
+                -((x - float(cx)) ** 2 + (y - float(cy)) ** 2) / (2.0 * s * s)
+            )
+
+        eye_w = torch.maximum(
+            _gauss(kps_ref[0][0], kps_ref[0][1], sigma_eye),
+            _gauss(kps_ref[1][0], kps_ref[1][1], sigma_eye),
+        )
+        mouth_cx = (float(kps_ref[3][0]) + float(kps_ref[4][0])) * 0.5
+        mouth_cy = (float(kps_ref[3][1]) + float(kps_ref[4][1])) * 0.5
+        mouth_w = _gauss(mouth_cx, mouth_cy, sigma_mouth)
+
+        weights = 0.5 + 1.5 * torch.maximum(eye_w, mouth_w)
+        return weights.clamp(0.3, 2.5).unsqueeze(0)
+
+    @staticmethod
+    @torch.no_grad()
+    def _guided_filter(
+        guide: torch.Tensor,
+        src: torch.Tensor,
+        r: int,
+        eps: float = 1e-3,
+    ) -> torch.Tensor:
+        kernel = 2 * r + 1
+
+        def box(x: torch.Tensor) -> torch.Tensor:
+            return F.avg_pool2d(x, kernel_size=kernel, stride=1, padding=r)
+
+        mean_I = box(guide)
+        mean_p = box(src)
+        corr_Ip = box(guide * src) - mean_I * mean_p
+        var_I = box(guide * guide) - mean_I * mean_I
+        a = corr_Ip / (var_I + eps)
+        b = mean_p - a * mean_I
+        mean_a = box(a)
+        mean_b = box(b)
+        return mean_a * guide + mean_b
+
+    @torch.no_grad()
+    def _donor_similarity(
+        self,
+        face_512: torch.Tensor,
+        kps_5_crop: np.ndarray,
+        s_e: np.ndarray,
+        arcface_model: str,
+    ) -> float:
+        emb, _ = self.worker.function_worker.run_recognize_direct(
+            face_512, kps_5_crop, "Auto", arcface_model
+        )
+        if emb is None or emb.size == 0:
+            return -1.0
+        try:
+            return float(
+                self.worker.function_worker.findCosineDistance(emb, s_e)
+            )
+        except Exception:
+            return -1.0
 
     @torch.no_grad()
     def sharpness_score(
@@ -4128,26 +4329,9 @@ class PipelineProcessor:
         mask: torch.Tensor = None,
         tenengrad_thresh: float = 0.05,
         comb_weight: float = 0.5,
+        weight: torch.Tensor = None,
     ) -> dict:
-        """
-        Calculates three sharpness metrics on an RGB image:
-          1) var_lap: Variance of Laplacian
-          2) tten: Thresholded Tenengrad (Proportion of strong edges)
-          3) combined: comb_weight*var_lap + (1-comb_weight)*tten
 
-        Args:
-            image: Tensor [3, H, W], float in [0..1]
-            mask:  optional Tensor [H, W] or [1, H, W] with 1=valid, 0=ignore
-            tenengrad_thresh: Threshold for Tenengrad (0..1)
-            comb_weight: Weight for var_lap in combination (0..1)
-
-        Returns:
-            {
-              "var_lap": float Tensor,
-              "ttengrad": float Tensor,
-              "combined": float Tensor
-            }
-        """
         image = image / 255.0
 
         # 1) Grayscale [1,1,H,W]
@@ -4172,8 +4356,16 @@ class PipelineProcessor:
             L = L * m
             L2 = L2 * m
         cnt = valid_count(L2)
-        mean_L2 = L2.sum() / cnt
-        mean_L = L.sum() / cnt
+        if weight is not None:
+            w = weight.float()
+            if w.dim() == 3:
+                w = w.squeeze(0)
+            wsum = w.sum().clamp(min=1e-6)
+            mean_L2 = (L2 * w).sum() / wsum
+            mean_L = (L * w).sum() / wsum
+        else:
+            mean_L2 = L2.sum() / cnt
+            mean_L = L.sum() / cnt
         var_lap = (mean_L2 - mean_L.pow(2)).clamp(min=0.0)
 
         # --- Thresholded Tenengrad ---
@@ -4183,9 +4375,11 @@ class PipelineProcessor:
         G = (Gx.pow(2) + Gy.pow(2)).sqrt()
         if m is not None:
             G = G * m
-        total = cnt
-        strong = (G > tenengrad_thresh).float().sum()
-        ttengrad = strong / total
+        strong_mask = (G > tenengrad_thresh).float()
+        if weight is not None:
+            ttengrad = (strong_mask * w).sum() / wsum
+        else:
+            ttengrad = strong_mask.sum() / cnt
 
         # --- Combined Score ---
         combined = comb_weight * var_lap + (1 - comb_weight) * ttengrad
@@ -4219,24 +4413,22 @@ class PipelineProcessor:
         gy = F.conv2d(gray, self.kernel_sobel_y, padding=1).squeeze(0).squeeze(0)
         grad = (gx.pow(2) + gy.pow(2)).sqrt()  # [H,W]
 
-        # Robust normalization via percentiles inside mask (if given)
         def robust_norm(x, msk):
             if msk is not None:
                 sel = x[msk > 0]
-                if sel.numel() < 16:  # fallback if mask tiny
+                if sel.numel() < 16:
                     sel = x.reshape(-1)
             else:
                 sel = x.reshape(-1)
-            p5 = (
-                torch.quantile(sel, 0.05)
-                if sel.numel() > 0
-                else torch.tensor(0.0, device=device)
-            )
-            p95 = (
-                torch.quantile(sel, 0.95)
-                if sel.numel() > 0
-                else torch.tensor(1.0, device=device)
-            )
+            n = sel.numel()
+            if n == 0:
+                p5 = torch.tensor(0.0, device=device)
+                p95 = torch.tensor(1.0, device=device)
+            else:
+                k_lo = min(n, max(1, int(0.05 * (n - 1)) + 1))
+                k_hi = min(n, max(1, int(0.95 * (n - 1)) + 1))
+                p5 = torch.kthvalue(sel, k_lo).values
+                p95 = torch.kthvalue(sel, k_hi).values
             y = (x - p5) / (p95 - p5 + eps)
             return y.clamp_(0, 1)
 
@@ -4249,22 +4441,16 @@ class PipelineProcessor:
 
         smap = comb_weight * lap_n + (1.0 - comb_weight) * grad_n  # [H,W]
 
-        # Optional smoothing to avoid noisy alpha
-        # FW-ROBUST-09: ensure kernel size is odd and at least 3
         if smooth_kernel:
             if smooth_kernel % 2 == 0:
                 smooth_kernel += 1
             smooth_kernel = max(3, smooth_kernel)
         if smooth_kernel and smooth_kernel >= 3:
-            k = int(smooth_kernel)
-            s_val = float(max(1, k // 2))
-            smap3 = smap.unsqueeze(0).unsqueeze(0)  # [1,1,H,W]
-
-            # OPTIMIZATION: Functional blur mapping
+            r = max(1, int(smooth_kernel) // 2)
+            guide = (image / 255.0).mean(dim=0, keepdim=True).unsqueeze(0)
+            smap3 = smap.unsqueeze(0).unsqueeze(0)
             smap = (
-                v2.functional.gaussian_blur(
-                    smap3, kernel_size=[k, k], sigma=[s_val, s_val]
-                )
+                self._guided_filter(guide, smap3, r=r, eps=1e-3)
                 .squeeze(0)
                 .squeeze(0)
             )
@@ -4282,21 +4468,6 @@ class PipelineProcessor:
         pad_mode: str = "replicate",
         align_corners: bool = True,
     ) -> torch.Tensor:
-        """
-        MPEG-like Block Jitter: shifts every BxB block field by a
-        deterministic (bx, by)-dependent offset in pixels.
-
-        Args:
-            img: Tensor [C, H, W] (BGR/RGB agnostic). CPU or CUDA.
-            block_size: Block size B (e.g. 8).
-            max_amount_pixels: max |Offset| in pixels (applied to both axes).
-            seed: global seed for deterministic offsets (frame-stable).
-            pad_mode: Padding mode for border (replicate|reflect|zeros).
-            align_corners: as in grid_sample.
-
-        Returns:
-            Tensor [C, H, W] – same Device/Dtype as input.
-        """
         seed = seed + self.worker.frame_number * 17
         assert img.ndim == 3, "expected [C,H,W]"
         C, H, W = img.shape
@@ -4391,16 +4562,6 @@ class PipelineProcessor:
 
     @torch.no_grad()
     def analyze_image(self, image):
-        """
-        Analyses a CHW uint8 image tensor and returns a dict of quality scores in [0, 1].
-
-        Computed metrics:
-          - ``jpeg_artifacts``: High-frequency energy (higher = more ringing/blocking).
-          - ``salt_pepper_noise``: Fraction of pixels with sharp local outliers.
-          - ``speckle_noise``: Mean local variance (higher = more speckle).
-          - ``blur``: Inverted Laplacian edge strength (higher = blurrier).
-          - ``low_contrast``: Inverted pixel standard deviation (higher = flatter).
-        """
         image = image.float() / 255.0
         C, H, W = image.shape
         grayscale = torch.mean(image, dim=0, keepdim=True)
