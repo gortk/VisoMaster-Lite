@@ -137,6 +137,9 @@ class MediaPipeline(QObject):
         self.manual_dropped_skip_count: int = 0
         self.read_error_skip_count: int = 0
         self.stopped_by_error_limit: bool = False
+        self._segments_base_parameters = None
+        self._segments_base_control = None
+        self._active_segment_start = None
 
     # --- BUFFER MANAGEMENT ---
 
@@ -389,20 +392,31 @@ class MediaPipeline(QObject):
                         else:
                             break
 
-                # 2. Handle Manual Frame Drops
-                if (
-                    (is_segment_mode or self.vp.recording)
-                    and not self.vp.ffmpeg_input_sp
-                    and self.vp.current_frame_number in self.main_window.dropped_frames
-                ):
-                    self._mark_skipped_frame(
-                        self.vp.current_frame_number, "manual_drop"
+                # 2. Handle Manual Frame Drops and Excluded Segments
+                if not self.vp.ffmpeg_input_sp:
+                    current_fn = self.vp.current_frame_number
+                    exclude_end = video_control_actions.find_exclude_segment_end(
+                        self.main_window, current_fn
                     )
-                    self.vp.current_frame_number += 1
-                    misc_helpers.seek_frame(
-                        self.vp.media_capture, self.vp.current_frame_number
+                    is_manual_drop = (
+                        (is_segment_mode or self.vp.recording)
+                        and current_fn in self.main_window.dropped_frames
                     )
-                    continue
+                    if exclude_end is not None:
+                        for fn in range(current_fn, exclude_end + 1):
+                            self._mark_skipped_frame(fn, "manual_drop")
+                        self.vp.current_frame_number = exclude_end + 1
+                        misc_helpers.seek_frame(
+                            self.vp.media_capture, self.vp.current_frame_number
+                        )
+                        continue
+                    if is_manual_drop:
+                        self._mark_skipped_frame(current_fn, "manual_drop")
+                        self.vp.current_frame_number = current_fn + 1
+                        misc_helpers.seek_frame(
+                            self.vp.media_capture, self.vp.current_frame_number
+                        )
+                        continue
 
                 # 3. Determine Input Resolution
                 current_resize_toggle = self.main_window.control.get(
@@ -728,7 +742,32 @@ class MediaPipeline(QObject):
                         self.feeder_control = new_control
                         last_marker_data = marker_data
                         self.ui_state_is_dirty = True
-
+                    _seg = None
+                    for _s in getattr(self.main_window, "segments", []):
+                        if _s.get("kind") == "normal" and _s.get("parameters") is not None:
+                            if int(_s["start"]) <= frame_num_to_process <= int(_s["end"]):
+                                _seg = _s
+                                break
+                    _seg_start = int(_seg["start"]) if _seg else None
+                    if _seg_start != self._active_segment_start:
+                        if _seg is not None:
+                            self.feeder_parameters = copy.deepcopy(_seg["parameters"])
+                            _seg_control = copy.deepcopy(_seg.get("control") or {})
+                            base_control = self._segments_base_control or {}
+                            for _pk in (
+                                "OutputMediaFolder",
+                                "OutputToTargetLocationToggle",
+                                "PreserveOutputDirectoryStructureToggle",
+                                "ClusterOutputBySourceToggle",
+                            ):
+                                if _pk in base_control:
+                                    _seg_control[_pk] = base_control[_pk]
+                            self.feeder_control = _seg_control
+                        elif self._segments_base_parameters is not None:
+                            self.feeder_parameters = copy.deepcopy(self._segments_base_parameters)
+                            self.feeder_control = copy.deepcopy(self._segments_base_control)
+                        self._active_segment_start = _seg_start
+                        self.ui_state_is_dirty = True
                     if getattr(self, "ui_state_is_dirty", True) or not hasattr(
                         self, "_cached_params"
                     ):

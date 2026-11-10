@@ -301,7 +301,9 @@ def add_segment(main_window: "MainWindow", start: int, end: int):
             kept.append({"start": s, "end": new_start - 1, "kind": seg["kind"]})
         if e > new_end:
             kept.append({"start": new_end + 1, "end": e, "kind": seg["kind"]})
-    kept.append({"start": new_start, "end": new_end, "kind": "normal"})
+    new_seg = {"start": new_start, "end": new_end, "kind": "normal"}
+    _capture_segment_snapshot(main_window, new_seg)
+    kept.append(new_seg)
     kept.sort(key=lambda x: x["start"])
     main_window.segments = kept
     main_window.videoSeekSlider.update()
@@ -309,7 +311,11 @@ def add_segment(main_window: "MainWindow", start: int, end: int):
 
 def set_segment_kind(main_window: "MainWindow", index: int, kind: str):
     if 0 <= index < len(main_window.segments):
-        main_window.segments[index]["kind"] = kind
+        seg = main_window.segments[index]
+        was_normal = seg.get("kind") == "normal"
+        seg["kind"] = kind
+        if kind == "normal" and not was_normal and seg.get("parameters") is None:
+            _capture_segment_snapshot(main_window, seg)
         main_window.videoSeekSlider.update()
 
 
@@ -339,6 +345,97 @@ def show_segment_context_menu(main_window: "MainWindow", index: int, global_pos)
         partial(remove_segment, main_window, index),
     )
     menu.exec(global_pos)
+
+
+def find_exclude_segment_end(main_window: "MainWindow", frame_number: int) -> int | None:
+    segments = getattr(main_window, "segments", [])
+    max_end = None
+    for seg in segments:
+        if seg.get("kind") == "exclude":
+            s, e = int(seg["start"]), int(seg["end"])
+            if s <= frame_number <= e and (max_end is None or e > max_end):
+                max_end = e
+    if max_end is None:
+        return None
+    changed = True
+    while changed:
+        changed = False
+        for seg in segments:
+            if seg.get("kind") == "exclude":
+                s, e = int(seg["start"]), int(seg["end"])
+                if s <= max_end + 1 <= e and e > max_end:
+                    max_end = e
+                    changed = True
+    return max_end
+
+
+def is_frame_in_excluded_segment(main_window: "MainWindow", frame_number: int) -> bool:
+    return find_exclude_segment_end(main_window, frame_number) is not None
+
+
+def apply_exclude_segments(
+    main_window: "MainWindow", ranges: list[tuple[int, int]]
+) -> list[tuple[int, int]]:
+    excludes = [
+        (int(seg["start"]), int(seg["end"]))
+        for seg in getattr(main_window, "segments", [])
+        if seg.get("kind") == "exclude"
+    ]
+    if not excludes:
+        return list(ranges)
+    result: list[tuple[int, int]] = []
+    for start, end in ranges:
+        pieces = [(int(start), int(end))]
+        for ex_start, ex_end in excludes:
+            next_pieces = []
+            for s, e in pieces:
+                if ex_end < s or ex_start > e:
+                    next_pieces.append((s, e))
+                    continue
+                if s < ex_start:
+                    next_pieces.append((s, ex_start - 1))
+                if e > ex_end:
+                    next_pieces.append((ex_end + 1, e))
+            pieces = next_pieces
+            if not pieces:
+                break
+        result.extend(pieces)
+    return result
+
+
+def get_active_normal_segment(main_window: "MainWindow", frame_number: int) -> dict | None:
+    for seg in getattr(main_window, "segments", []):
+        if seg.get("kind") == "normal" and seg.get("parameters") is not None:
+            if int(seg["start"]) <= frame_number <= int(seg["end"]):
+                return seg
+    return None
+
+
+def _capture_segment_snapshot(main_window: "MainWindow", segment: dict) -> None:
+    segment["parameters"] = copy.deepcopy(main_window.parameters)
+    segment["control"] = copy.deepcopy(main_window.control)
+
+
+def _capture_base_snapshot(main_window: "MainWindow") -> None:
+    main_window._segments_base_parameters = main_window.parameters
+    main_window._segments_base_control = main_window.control
+
+
+def _apply_segment_to_state(main_window: "MainWindow", segment: dict) -> None:
+    if segment is None or segment.get("parameters") is None:
+        return
+    main_window.parameters = segment["parameters"]
+    if segment.get("control") is not None:
+        main_window.control = segment["control"]
+
+
+def _restore_base_state(main_window: "MainWindow") -> None:
+    base_params = getattr(main_window, "_segments_base_parameters", None)
+    base_control = getattr(main_window, "_segments_base_control", None)
+    if base_params is not None:
+        main_window.parameters = base_params
+    if base_control is not None:
+        main_window.control = base_control
 
 
 def add_marker(
@@ -1684,6 +1781,8 @@ def record_video(main_window: "MainWindow", checked: bool):
                 for s in getattr(main_window, "segments", [])
                 if s.get("kind") == "normal" and s["end"] > s["start"]
             ]
+        segments = apply_exclude_segments(main_window, segments)
+        segments = [(s, e) for s, e in segments if s < e]
         marker_pairs = segments
 
         if not marker_pairs or (
@@ -2126,33 +2225,34 @@ def on_slider_pressed(main_window: "MainWindow"):
 
 
 def run_post_seek_actions(main_window: "MainWindow", new_position: int):
-    """
-    Executes heavy operations (markers, AutoSwap) after a seek.
-    This function is called after a slider release or a jump via button/shortcut.
-    """
-
-    # Reset ByteTracker state on every user-initiated seek so stale Kalman predictions
-    # from the previous position do not corrupt detection on the new position.
     main_window.function_worker.reset_face_tracker()
 
-    # Check if the user wants to update the UI based on markers when seeking
-    track_markers_enabled = main_window.control.get("TrackMarkersToggle", False)
+    segment = get_active_normal_segment(main_window, new_position)
+    was_in_segment = bool(getattr(main_window, "_in_normal_segment", False))
+    now_in_segment = segment is not None
 
-    if track_markers_enabled:
-        # 1. Update parameters if the slider lands on a marker
-        # Acquire lock to safely modify parameters read by worker threads
+    if now_in_segment:
+        if not was_in_segment and getattr(main_window, "_segments_base_parameters", None) is None:
+            _capture_base_snapshot(main_window)
         with main_window.models_processor.model_lock:
-            update_parameters_and_control_from_marker(main_window, new_position)
+            _apply_segment_to_state(main_window, segment)
             update_widget_values_from_markers(main_window, new_position)
-    # If tracking is disabled, we do nothing, preserving the user's manual changes.
+    elif was_in_segment:
+        with main_window.models_processor.model_lock:
+            _restore_base_state(main_window)
+            update_widget_values_from_markers(main_window, new_position)
+    else:
+        _capture_base_snapshot(main_window)
+        track_markers_enabled = main_window.control.get("TrackMarkersToggle", False)
+        if track_markers_enabled:
+            with main_window.models_processor.model_lock:
+                update_parameters_and_control_from_marker(main_window, new_position)
+                update_widget_values_from_markers(main_window, new_position)
 
-    # 2. If AutoSwap is enabled, run face detection/matching NOW.
-    # This is independent of marker tracking.
+    main_window._in_normal_segment = now_in_segment
+
     if main_window.control.get("AutoSwapToggle", False):
-        # Find new faces and add them to the target list.
         card_actions.find_target_faces(main_window)
-
-        # This block is necessary to auto-select the first face and assign inputs.
         if main_window.target_faces and not main_window.selected_target_face_id:
             list(main_window.target_faces.values())[0].click()
 

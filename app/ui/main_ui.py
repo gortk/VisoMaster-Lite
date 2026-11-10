@@ -187,6 +187,9 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
 
         self.segments: list[dict] = []
         self.segment_creation_mode = False
+        self._segments_base_parameters = None
+        self._segments_base_control = None
+        self._in_normal_segment = False
 
         self.last_target_media_folder_path = ""
         self.last_input_media_folder_path = ""

@@ -1034,7 +1034,30 @@ def _workspace_after_inputs(main_window, data, data_filename):
                     loaded_segments = [
                         {"start": int(s), "end": int(e), "kind": "normal"}
                     ]
-        main_window.segments = loaded_segments
+        default_params = main_window.default_parameters
+        normalized_segments = []
+        for s in loaded_segments:
+            entry = {
+                "start": int(s["start"]),
+                "end": int(s["end"]),
+                "kind": s.get("kind", "normal"),
+                "parameters": None,
+                "control": s.get("control"),
+            }
+            raw_params = s.get("parameters")
+            if raw_params is not None:
+                entry["parameters"] = {
+                    str(fid): misc_helpers.ParametersDict(
+                        pd if isinstance(pd, dict) else dict(pd),
+                        default_params.data,
+                    )
+                    for fid, pd in raw_params.items()
+                }
+            normalized_segments.append(entry)
+        main_window.segments = normalized_segments
+        main_window._in_normal_segment = False
+        main_window._segments_base_parameters = main_window.parameters
+        main_window._segments_base_control = main_window.control
         raw_markers = data.get("markers", {})
         sanitized_markers_dict = sanitize_markers_dictionary(main_window, raw_markers)
         data["markers"] = convert_markers_to_supported_type(
@@ -1497,7 +1520,25 @@ def save_current_workspace(
             for face_id, frames in main_window.issue_frames_by_face.items()
         },
         "dropped_frames": sorted(main_window.dropped_frames),
-        "segments": getattr(main_window, "segments", []),
+        "segments": [
+            {
+                "start": int(s["start"]),
+                "end": int(s["end"]),
+                "kind": s.get("kind", "normal"),
+                "parameters": (
+                    {
+                        fid: pd.data.copy() if hasattr(pd, "data") else dict(pd)
+                        for fid, pd in s["parameters"].items()
+                    }
+                    if s.get("parameters") is not None
+                    else None
+                ),
+                "control": copy.deepcopy(s.get("control"))
+                if s.get("control") is not None
+                else None,
+            }
+            for s in getattr(main_window, "segments", [])
+        ],
         "last_target_media_folder_path": main_window.last_target_media_folder_path,
         "last_input_media_folder_path": main_window.last_input_media_folder_path,
         "loaded_embedding_filename": main_window.loaded_embedding_filename,

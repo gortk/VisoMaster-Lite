@@ -238,17 +238,25 @@ class IssueScanner:
 
     def _get_issue_scan_ranges(self) -> List[Tuple[int, int]]:
         max_frame = int(self.max_frame_number)
-        scan_ranges: List[Tuple[int, int]] = []
-        for seg in getattr(self.main_window, "segments", []):
-            if seg.get("kind") == "exclude":
-                continue
-            s = int(seg["start"])
-            e = int(seg["end"])
-            if e >= s and s <= max_frame:
-                scan_ranges.append((s, min(e, max_frame)))
-        if scan_ranges:
-            return misc_helpers.normalize_issue_scan_ranges(scan_ranges)
-        return [(0, max_frame)]
+        segments = list(getattr(self.main_window, "segments", []))
+        if not segments:
+            return [(0, max_frame)]
+        includes = [
+            (int(seg["start"]), min(int(seg["end"]), max_frame))
+            for seg in segments
+            if seg.get("kind") in ("normal", "recording")
+            and int(seg["start"]) < int(seg["end"])
+            and int(seg["start"]) <= max_frame
+        ]
+        if not includes:
+            includes = [(0, max_frame)]
+        ranges = video_control_actions.apply_exclude_segments(
+            self.main_window, includes
+        )
+        ranges = [(s, e) for s, e in ranges if s <= e]
+        if not ranges:
+            return [(0, max_frame)]
+        return misc_helpers.normalize_issue_scan_ranges(ranges)
 
 
     def describe_issue_scan_scope(

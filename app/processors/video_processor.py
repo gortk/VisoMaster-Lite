@@ -712,6 +712,10 @@ class VideoProcessor(QObject):
                 if seg.get("kind") == "normal" and int(seg["start"]) < int(seg["end"]):
                     valid_pairs.append((int(seg["start"]), int(seg["end"])))
 
+            valid_pairs = video_control_actions.apply_exclude_segments(
+                self.main_window, valid_pairs
+            )
+            valid_pairs = [(s, e) for s, e in valid_pairs if s < e]
             if valid_pairs:
                 self.segments_to_process = sorted(valid_pairs)
                 self.is_playing_segments = True
@@ -2977,10 +2981,22 @@ class VideoProcessor(QObject):
         target_fps = 9999.0  # Always max speed for segments
         is_first = self.current_segment_index == 0
 
-        # Push the UI state into the pipeline before starting the thread
         with self.state_lock:
             self.feeder_parameters = copy.deepcopy(self.main_window.parameters)
             self.feeder_control = copy.deepcopy(self.main_window.control)
+            if not getattr(self.main_window, "_in_normal_segment", False):
+                self.main_window._segments_base_parameters = self.main_window.parameters
+                self.main_window._segments_base_control = self.main_window.control
+            if getattr(self.main_window, "_segments_base_parameters", None) is None:
+                self.main_window._segments_base_parameters = self.main_window.parameters
+                self.main_window._segments_base_control = self.main_window.control
+            self.media_pipeline._segments_base_parameters = copy.deepcopy(
+                self.main_window._segments_base_parameters
+            )
+            self.media_pipeline._segments_base_control = copy.deepcopy(
+                self.main_window._segments_base_control
+            )
+            self.media_pipeline._active_segment_start = None
 
         print(
             f"[INFO] Starting feeder thread via Pipeline (Mode: segment {self.current_segment_index})..."
