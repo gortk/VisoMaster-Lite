@@ -13,7 +13,7 @@ COMMON_LAYOUT_DATA: Any = {
         },
         "FaceRestorerTypeSelection": {
             "level": 2,
-            "label": "Restorer Type  ",
+            "label": "Restorer Type  (💬)",
             "options": [
                 "GFPGAN-v1.4",
                 "GFPGAN-1024",
@@ -311,7 +311,7 @@ COMMON_LAYOUT_DATA: Any = {
         },
         "FaceExpressionCropScaleBothDecimalSlider": {
             "level": 2,
-            "label": "Crop Scale",
+            "label": "Head Crop Size  (💬)",
             "min_value": "1.5",
             "max_value": "3.0",
             "default": "2.3",
@@ -319,11 +319,11 @@ COMMON_LAYOUT_DATA: Any = {
             "decimals": 1,
             "parentToggle": "FaceExpressionEnableBothToggle",
             "requiredToggleValue": True,
-            "help": "Changes swap crop scale. Increase the value to capture the face more distantly. For Recast, best used around 1.5.",
+            "help": "How much of the frame around the head is included in the crop used by the expression and pose models. Higher = more context (hair, shoulders, background); lower = larger face in the model input. Increase if the top of the head or chin is being cut off, or if the head is heavily turned. Decrease if motion looks weak or the output looks soft. Recast works best around 1.5.",
         },
         "FaceExpressionVYRatioBothDecimalSlider": {
             "level": 2,
-            "label": "VY Ratio",
+            "label": "Vertical Framing  (💬)",
             "min_value": "-0.125",
             "max_value": "-0.100",
             "default": "-0.125",
@@ -331,7 +331,7 @@ COMMON_LAYOUT_DATA: Any = {
             "decimals": 3,
             "parentToggle": "FaceExpressionEnableBothToggle",
             "requiredToggleValue": True,
-            "help": "Changes the vy ratio for crop scale. Increase the value to capture the face more distantly.",
+            "help": "Shifts the crop window up or down. Negative moves it up, positive moves it down. Make it more negative if the forehead or hair clips at the top; make it less negative if too much empty space sits above the head.",
         },
         # --- RECAST MODE WIDGETS (PerformRecast model) ---
         "RecastModeSelection": {
@@ -589,6 +589,20 @@ COMMON_LAYOUT_DATA: Any = {
             "parentSelection": "FaceExpressionModeSelection",
             "requiredSelectionValue": "Advanced",
             "help": "Percentage of expression to add. Swapped Face already has some expression due to swap, adding complet expression is not recommended and slider should be lower than 1.0",
+        },
+        "FaceExpressionEyeGazeAuthorityDecimalSlider": {
+            "level": 4,
+            "label": "Eye Gaze Authority",
+            "min_value": "0.00",
+            "max_value": "1.00",
+            "default": "0.60",
+            "step": 0.05,
+            "decimals": 2,
+            "parentToggle": "FaceExpressionEnableBothToggle & FaceExpressionEyesToggle",
+            "requiredToggleValue": True,
+            "parentSelection": "FaceExpressionModeSelection",
+            "requiredSelectionValue": "Advanced",
+            "help": "How much of the driving face's horizontal pupil direction is applied to the swapped face. 0.60 preserves the eye-escape protection on donors whose sockets differ strongly. Higher values track the driver more tightly. Independent of the Neutral slider, which controls vertical gaze and eyelid motion.",
         },
         "FaceExpressionCameraGazeToggle": {
             "level": 4,

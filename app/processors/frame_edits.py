@@ -13,30 +13,12 @@ if TYPE_CHECKING:
 
 
 class FrameEdits:
-    """
-    Manages Face Editing operations (Expression restoration, LivePortrait editing, Makeup).
-    Moves high-level processing logic out of FrameWorker.
-
-    This class handles the 'LivePortrait' pipeline, including:
-    - Motion Extraction (Pose, Expression)
-    - Temporal Smoothing (SmartSmoother & OneEuroFilter)
-    - Feature Retargeting (Eyes, Lips)
-    - Image Warping and Pasting
-    """
 
     def __init__(
         self,
         models_processor: "ModelsProcessor",
         function_worker: "FunctionWorker",
     ):
-        """
-        Initializes the FrameEdits class.
-
-        Args:
-            models_processor: Reference to the central model manager (provides models & device).
-            function_worker: The central FunctionWorker instance. Passed to sub-processors
-                              so they can route calls through this Facade.
-        """
         self.models_processor = models_processor
         self.function_worker = function_worker
 
@@ -54,13 +36,6 @@ class FrameEdits:
         self._shaping_cache: dict[str, Any] | None = None
 
     def set_transforms(self, t256_face, interpolation_expression_faceeditor_back):
-        """
-        Updates the scaling transforms and interpolation modes based on current control settings.
-        Called from FrameWorker.set_scaling_transforms.
-
-        Always sets self.t256_face so callers never fall back to a lazy init that
-        ignores the requested interpolation mode.
-        """
         if t256_face is not None:
             self.t256_face = t256_face
         else:
@@ -76,22 +51,7 @@ class FrameEdits:
     def _apply_kornia_warp(
         self, out: torch.Tensor, M_c2o: np.ndarray, dsize: tuple[int, int]
     ) -> torch.Tensor:
-        """
-        Internal helper to warp and paste the processed face back into the original frame using Kornia.
-        Optimized to reduce code duplication and improve PCIe transfer latency.
-
-        Args:
-            out: The processed face tensor (C, H, W).
-            M_c2o: Transformation matrix (Crop to Original).
-            dsize: Destination size (Height, Width) of the full frame.
-
-        Returns:
-            torch.Tensor: The warped tensor ready for blending.
-        """
         out = faceutil.pad_image_by_size(out, dsize)
-
-        # OPTIMIZED: non_blocking=True prevents the CPU thread from stalling while waiting
-        # for the RAM-to-VRAM transfer to complete via the PCIe bus.
         M_c2o_tensor = (
             torch.from_numpy(M_c2o)
             .float()
@@ -120,23 +80,6 @@ class FrameEdits:
         control: dict,
         driving_kps: np.ndarray | None = None,
     ) -> torch.Tensor:
-        """
-        Restores the expression of the face using the LivePortrait model pipeline.
-
-        Features:
-        - Target Smoothing to reduce global jitter.
-        - Ratio Smoothing (Eyes/Lips) to reduce high-frequency jitter on cilia/mouth.
-        - Smart Dynamic Boost for Micro-Expressions: Amplifies subtle motions while
-          protecting strong expressions from distortion.
-
-        Args:
-            driving: The original face tensor (source of expression).
-            target: The swapped face tensor (destination of expression).
-            parameters: Dictionary containing UI parameters.
-
-        Returns:
-            torch.Tensor: The expression-restored face image.
-        """
         # SETUP THE ASYNCHRONOUS CONTEXT
         import contextlib
 
@@ -317,13 +260,6 @@ class FrameEdits:
                 use_boost: bool = False,
                 neutral_factor: float = 0.3,
             ) -> torch.Tensor:
-                """
-                Helper to calculate motion with 'Smart Dynamic Boost' and 'Neutral Factor'.
-
-                - Openness Gate: Ignores closed eyes.
-                - Yaw Falloff (Cosine Squared): Boosts strength (+25%) when facing forward,
-                  and smoothly attenuates strength on profiles (>45 deg) to prevent fisheye limits.
-                """
                 delta_local = x_s_info["exp"].clone()
                 force_camera_gaze = parameters.get(
                     "FaceExpressionCameraGazeToggle", False
@@ -491,7 +427,10 @@ class FrameEdits:
                                 diff[:, idx_15, 0] * gaze_dampening
                             )
                         else:
-                            gaze_x_blend = 0.60
+                            gaze_authority = parameters.get(
+                                "FaceExpressionEyeGazeAuthorityDecimalSlider", 0.60
+                            )
+                            gaze_x_blend = max(0.60, neutral_factor, gaze_authority)
                             delta_local[:, 11, 0] = torch.lerp(
                                 current_exp[:, idx_11, 0],
                                 target_exp[:, idx_11, 0],
@@ -518,18 +457,7 @@ class FrameEdits:
                 absolute_motion: torch.Tensor,
                 normalize_eyes_enabled: bool = False,
             ) -> torch.Tensor:
-                """
-                Relative Lids + Retargeted Gaze eye merge:
-                - keep horizontal gaze direction from the absolute + retargeted eye motion
-                - keep eyelid/blink shape from the relative eye motion
-                - blend back some retargeted vertical lid motion so Normalize Eyes
-                  and Eyes Multiplier still have visible influence
-                """
                 merged_motion = relative_motion.clone()
-
-                # --- GAZE PRECISION (X-Axis) ---
-                # 50% Absolute provides enough authority to direct the iris precisely,
-                # while leaving 50% Relative to prevent IPD tearing on profile angles.
                 gaze_blend = 0.50
                 merged_motion[:, 11, 0] = torch.lerp(
                     relative_motion[:, 11, 0], absolute_motion[:, 11, 0], gaze_blend
@@ -538,10 +466,6 @@ class FrameEdits:
                     relative_motion[:, 15, 0], absolute_motion[:, 15, 0], gaze_blend
                 )
 
-                # Vertical eye motion carries both lid state and some gaze drift.
-                # Blend a limited amount of the retargeted branch back in so the
-                # shipped mode still benefits from Normalize Eyes / Eyes Multiplier
-                # without losing the relative eyelid feel that made it useful.
                 eyelid_blend = 0.45 if normalize_eyes_enabled else 0.30
                 eye_center_blend = 0.35 if normalize_eyes_enabled else 0.20
 
@@ -930,24 +854,6 @@ class FrameEdits:
         control: dict,
         driving_kps: np.ndarray | None = None,
     ) -> torch.Tensor:
-        """Transfer expression onto the swapped face using PerformRecast.
-
-        This is the "Recast" mode of the Face Expression Restorer. Unlike the
-        LivePortrait path it uses the PerformRecast 49-keypoint sub-networks
-        (appearance F, motion M, warping W, SPADE generator G) and composes the
-        expression with either the Enhancement (additive delta) or Replacement
-        (absolute driving expression with source-side identity blending) mode.
-
-        Args:
-            driving: The original pre-swap face tensor (source of expression).
-            target: The swapped face tensor (identity/pose to preserve).
-            parameters: Dictionary containing UI parameters.
-            control: UI control dictionary.
-            driving_kps: Optional pre-computed 203-point driving landmarks.
-
-        Returns:
-            torch.Tensor: The expression-recast face image (float32, [0,255]).
-        """
         import contextlib
 
         # Use the current stream (see apply_face_expression_restorer for why a
@@ -960,10 +866,6 @@ class FrameEdits:
             if local_stream
             else contextlib.nullcontext()
         )
-
-        # Eagerly load (and build TensorRT engines for) all four sub-networks so
-        # the build dialog is shown for every PerformRecast model, not just the
-        # ones that happen to need a lazy first-run build.
         self.function_worker.perform_recast_prewarm()
 
         with stream_context, torch.inference_mode():
@@ -1177,19 +1079,6 @@ class FrameEdits:
         control: dict,
         **kwargs,
     ) -> torch.Tensor:
-        """
-        Applies Face Editor manipulations (Pose, Gaze, Expression) to the face via manual sliders.
-        Optimized: Centralized GPU warp pasting.
-
-        Args:
-            img: The original image/frame.
-            swap_restorecalc: The reference face for detection.
-            parameters: Global parameters dictionary.
-            control: UI control dictionary.
-
-        Returns:
-            torch.Tensor: The manipulated face image.
-        """
         use_mean_eyes = parameters.get("LandmarkMeanEyesToggle", False)
         interp_mode = (
             self.interpolation_expression_faceeditor_back
@@ -1454,18 +1343,6 @@ class FrameEdits:
         control: dict,
         **kwargs: Any,
     ) -> torch.Tensor:
-        """
-        Applies digital makeup to the face using face parser masks.
-
-        Args:
-            img: The original image tensor.
-            kps: Keypoints of the face.
-            parameters: Global parameters dictionary.
-            control: Control settings dictionary.
-
-        Returns:
-            torch.Tensor: Image with makeup applied.
-        """
         if (
             parameters["FaceMakeupEnableToggle"]
             or parameters["HairMakeupEnableToggle"]
@@ -1526,28 +1403,9 @@ class FrameEdits:
     def apply_face_shaping_gpu(
         self, img: torch.Tensor, kps: np.ndarray, parameters: dict
     ) -> torch.Tensor:
-        """
-        Pure PyTorch implementation of 2D Mesh Deformation for Face Shaping.
-        Uses F.grid_sample to warp the tensor based on morphological coordinate offsets.
-        Runs entirely on the GPU to prevent host-to-device bottlenecks.
-
-        Handles both torch.uint8 (pre-swap original canvas) and torch.float32 (post-swap)
-        safely on CUDA devices.
-
-        Args:
-            img: 512x512 aligned swap tensor [C, H, W]
-            kps: 5-point landmarks in the 512x512 space
-            parameters: Dictionary containing the slider values
-
-        Returns:
-            torch.Tensor: Warped face tensor preserving the original input dtype.
-        """
         if not parameters.get("FaceShapingEnableToggle", False):
             return img
 
-        # P4-PERF: skip the full grid_sample warp when every slider is at its
-        # neutral value (50). Users often leave shaping on and dial a single
-        # slider; without this the warp still runs every frame.
         if all(
             abs(float(parameters.get(f"FaceShaping{s}Slider", 50)) - 50.0) <= 1.0
             for s in (
