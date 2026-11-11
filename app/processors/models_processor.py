@@ -59,6 +59,10 @@ from app.processors.models_data import (
     restorer_model_mapping,
     fp16_safe_models_list,
     tensorrt_shape_infer_models,
+    recast_model_names,
+    recast_fp16_models,
+    RECAST_CUDA_ARENA_SAME_AS_REQUESTED,
+    RECAST_TRT_WORKSPACE_CAP_BYTES,
     ARCFACE_DST,
     FFHQ_KPS,
     LANDMARKS_SUBSET_IDXS,
@@ -794,7 +798,10 @@ class ModelsProcessor(QtCore.QObject):
                     model_trt_options["trt_engine_cache_prefix"] = canonical_name
 
                 # Check if the model is explicitly marked as safe for FP16 in models_data.py
-                if canonical_name in fp16_safe_models_list:
+                if (
+                    canonical_name in fp16_safe_models_list
+                    or canonical_name in recast_fp16_models
+                ):
                     model_trt_options["trt_fp16_enable"] = True
                     print(f"[INFO] FP16 Acceleration ENABLED for {canonical_name}")
                 else:
@@ -813,6 +820,27 @@ class ModelsProcessor(QtCore.QObject):
                         )
                     else:
                         model_providers.append(p)
+
+                # --- PerformRecast VRAM tuning (see models_data.py) ---
+                if canonical_name in recast_model_names:
+                    if RECAST_TRT_WORKSPACE_CAP_BYTES:
+                        model_trt_options["trt_max_workspace_size"] = min(
+                            int(model_trt_options.get("trt_max_workspace_size", 0))
+                            or int(RECAST_TRT_WORKSPACE_CAP_BYTES),
+                            int(RECAST_TRT_WORKSPACE_CAP_BYTES),
+                        )
+                    if RECAST_CUDA_ARENA_SAME_AS_REQUESTED:
+                        model_providers = [
+                            (
+                                p[0],
+                                {**p[1], "arena_extend_strategy": "kSameAsRequested"},
+                            )
+                            if isinstance(p, tuple)
+                            and p[0] == "CUDAExecutionProvider"
+                            and isinstance(p[1], dict)
+                            else p
+                            for p in model_providers
+                        ]
 
                 is_tensorrt_load = any(
                     (p[0] if isinstance(p, tuple) else p) == "TensorrtExecutionProvider"
@@ -1422,23 +1450,39 @@ class ModelsProcessor(QtCore.QObject):
         if not toggles:
             return True  # Core models without UI toggles are always assumed needed
 
-        for toggle in toggles:
-            target_key = toggle.key
-
-            if hasattr(ctrl, "get") and _is_truthy(ctrl.get(target_key, False)):
-                return True
-            if hasattr(params, "get") and _is_truthy(params.get(target_key, False)):
-                return True
-            if hasattr(default_params, "get") and _is_truthy(
-                default_params.get(target_key, False)
+        def _toggle_counts(source: Any, toggle: Any) -> bool:
+            """True when the toggle is on in ``source`` AND its optional selection
+            gate (e.g. Expression Mode == Recast) matches in the same dict."""
+            if not hasattr(source, "get") or not _is_truthy(
+                source.get(toggle.key, False)
             ):
+                return False
+            sel_key = getattr(toggle, "selection_key", None)
+            if sel_key is None:
+                return True
+            current = source.get(sel_key, None)
+            if current is None:
+                current = default_params.get(sel_key, None)
+            current = "" if current is None else str(current).strip()
+            equals = getattr(toggle, "selection_equals", None)
+            not_equals = getattr(toggle, "selection_not_equals", None)
+            if equals is not None and current != equals:
+                return False
+            if not_equals is not None and current == not_equals:
+                return False
+            return True
+
+        for toggle in toggles:
+            if _toggle_counts(ctrl, toggle):
+                return True
+            if _toggle_counts(params, toggle):
+                return True
+            if _toggle_counts(default_params, toggle):
                 return True
 
             if hasattr(params, "values"):
                 for face_params in params.values():
-                    if hasattr(face_params, "get") and _is_truthy(
-                        face_params.get(target_key, False)
-                    ):
+                    if _toggle_counts(face_params, toggle):
                         return True
 
         return False

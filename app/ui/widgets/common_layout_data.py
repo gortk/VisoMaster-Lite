@@ -306,6 +306,8 @@ COMMON_LAYOUT_DATA: Any = {
             "requiredToggleValue": True,
             "help": "Choose 'Advanced' for fine-tuning and retargeting options. "
             "'Recast' uses the PerformRecast model for expression-only transfer.",
+            "exec_function": control_actions.handle_face_expression_mode_change,
+            "exec_function_args": ["FaceExpressionModeSelection"],
         },
         "FaceExpressionCropScaleBothDecimalSlider": {
             "level": 2,

@@ -411,6 +411,40 @@ tensorrt_shape_infer_models = [
     "AlphaFace",
 ]
 
+# --- PerformRecast ("Recast" mode) VRAM tuning ---------------------------------
+# All four sub-networks of the Recast back-end. The defaults below keep behaviour
+# identical to before except for the CUDA arena strategy, which only changes how
+# onnxruntime grows its scratch memory.
+recast_model_names = (
+    "PerformRecastAppearanceFeatureExtractor",
+    "PerformRecastMotionExtractor",
+    "PerformRecastWarpingModule",
+    "PerformRecastSpadeGenerator",
+)
+
+# onnxruntime's CUDA execution provider grows its memory arena by powers of two
+# and never shrinks it. Every graph node the TensorRT EP cannot take (e.g. the
+# 5-D GridSample of the warping module) runs on the CUDA EP, and each session
+# keeps its own arena. "kSameAsRequested" grows the arena by exactly what is
+# requested, so no padding is left allocated.
+RECAST_CUDA_ARENA_SAME_AS_REQUESTED = True
+
+# OPTIONAL. Cap (in bytes) for the TensorRT workspace pool of the Recast engines.
+# ModelsProcessor uses 40 % of total VRAM for every engine (4 GB on a 10 GB card).
+# A lower cap forbids scratch-hungry tactics, which can shrink the engine's runtime
+# memory. It only applies when an engine is (re)built: delete the matching files in
+# tensorrt-engines/ to rebuild. None = keep the global value.
+RECAST_TRT_WORKSPACE_CAP_BYTES: int | None = None
+
+# OPTIONAL. Recast models that may run in FP16. EMPTY BY DEFAULT ON PURPOSE: the
+# appearance extractor is a ViT, the kind of graph that fails silently in FP16
+# elsewhere in this file (see the TUFA note above fp16_safe_models_list). Only add
+# "PerformRecastAppearanceFeatureExtractor" / "PerformRecastMotionExtractor" after
+# comparing FP16 and FP32 output on real faces, then delete their engine files in
+# tensorrt-engines/ so they are rebuilt. The warping module and SPADE generator
+# have no FP16 kernel and must stay FP32.
+recast_fp16_models: list[str] = []
+
 models_list: list[dict[str, Any]] = [
     {
         "model_name": "Inswapper128",

@@ -17,6 +17,30 @@ class ToggleScope(Enum):
 class ToggleDef:
     key: str
     scope: ToggleScope
+    # Optional gate on a selection widget that lives in the same parameter dict as
+    # the toggle. The toggle only keeps the model "active" when the gate matches.
+    selection_key: str | None = None
+    selection_equals: str | None = None
+    selection_not_equals: str | None = None
+
+
+# The Face Expression Restorer has two back-ends that are chosen per face with
+# FaceExpressionModeSelection: LivePortrait ("Simple" / "Advanced") and
+# PerformRecast ("Recast"). Each back-end's models are only needed while at least
+# one face actually uses it. (LivePortrait models stay protected by the other
+# features that use them: Face Editor, Auto Mouth, makeups.)
+_EXPR_NOT_RECAST = ToggleDef(
+    "FaceExpressionEnableBothToggle",
+    ToggleScope.PER_FACE,
+    selection_key="FaceExpressionModeSelection",
+    selection_not_equals="Recast",
+)
+_EXPR_RECAST_ONLY = ToggleDef(
+    "FaceExpressionEnableBothToggle",
+    ToggleScope.PER_FACE,
+    selection_key="FaceExpressionModeSelection",
+    selection_equals="Recast",
+)
 
 
 # Centralized dictionary mapping exact model_name (from models_data.py) to UI toggle definitions.
@@ -132,7 +156,7 @@ MODELS_TOGGLE_MAP: Dict[str, List[ToggleDef]] = {
     ],
     # --- FACE EDITORS & EXPRESSIONS (LivePortrait) ---
     "LivePortraitMotionExtractor": [
-        ToggleDef("FaceExpressionEnableBothToggle", ToggleScope.PER_FACE),
+        _EXPR_NOT_RECAST,
         ToggleDef("AutoMouthExpressionEnableToggle", ToggleScope.PER_FACE),
         ToggleDef("FaceEditorEnableToggle", ToggleScope.PER_FACE),
         ToggleDef("FaceMakeupEnableToggle", ToggleScope.PER_FACE),
@@ -141,7 +165,7 @@ MODELS_TOGGLE_MAP: Dict[str, List[ToggleDef]] = {
         ToggleDef("LipsMakeupEnableToggle", ToggleScope.PER_FACE),
     ],
     "LivePortraitAppearanceFeatureExtractor": [
-        ToggleDef("FaceExpressionEnableBothToggle", ToggleScope.PER_FACE),
+        _EXPR_NOT_RECAST,
         ToggleDef("AutoMouthExpressionEnableToggle", ToggleScope.PER_FACE),
         ToggleDef("FaceEditorEnableToggle", ToggleScope.PER_FACE),
         ToggleDef("FaceMakeupEnableToggle", ToggleScope.PER_FACE),
@@ -150,7 +174,7 @@ MODELS_TOGGLE_MAP: Dict[str, List[ToggleDef]] = {
         ToggleDef("LipsMakeupEnableToggle", ToggleScope.PER_FACE),
     ],
     "LivePortraitStitching": [
-        ToggleDef("FaceExpressionEnableBothToggle", ToggleScope.PER_FACE),
+        _EXPR_NOT_RECAST,
         ToggleDef("AutoMouthExpressionEnableToggle", ToggleScope.PER_FACE),
         ToggleDef("FaceEditorEnableToggle", ToggleScope.PER_FACE),
         ToggleDef("FaceMakeupEnableToggle", ToggleScope.PER_FACE),
@@ -159,7 +183,7 @@ MODELS_TOGGLE_MAP: Dict[str, List[ToggleDef]] = {
         ToggleDef("LipsMakeupEnableToggle", ToggleScope.PER_FACE),
     ],
     "LivePortraitStitchingEye": [
-        ToggleDef("FaceExpressionEnableBothToggle", ToggleScope.PER_FACE),
+        _EXPR_NOT_RECAST,
         ToggleDef("AutoMouthExpressionEnableToggle", ToggleScope.PER_FACE),
         ToggleDef("FaceEditorEnableToggle", ToggleScope.PER_FACE),
         ToggleDef("FaceMakeupEnableToggle", ToggleScope.PER_FACE),
@@ -171,7 +195,7 @@ MODELS_TOGGLE_MAP: Dict[str, List[ToggleDef]] = {
         ),
     ],
     "LivePortraitStitchingLip": [
-        ToggleDef("FaceExpressionEnableBothToggle", ToggleScope.PER_FACE),
+        _EXPR_NOT_RECAST,
         ToggleDef("AutoMouthExpressionEnableToggle", ToggleScope.PER_FACE),
         ToggleDef("FaceEditorEnableToggle", ToggleScope.PER_FACE),
         ToggleDef("FaceMakeupEnableToggle", ToggleScope.PER_FACE),
@@ -183,7 +207,7 @@ MODELS_TOGGLE_MAP: Dict[str, List[ToggleDef]] = {
         ),
     ],
     "LivePortraitWarpingSpade": [
-        ToggleDef("FaceExpressionEnableBothToggle", ToggleScope.PER_FACE),
+        _EXPR_NOT_RECAST,
         ToggleDef("AutoMouthExpressionEnableToggle", ToggleScope.PER_FACE),
         ToggleDef("FaceEditorEnableToggle", ToggleScope.PER_FACE),
         ToggleDef("FaceMakeupEnableToggle", ToggleScope.PER_FACE),
@@ -192,7 +216,7 @@ MODELS_TOGGLE_MAP: Dict[str, List[ToggleDef]] = {
         ToggleDef("LipsMakeupEnableToggle", ToggleScope.PER_FACE),
     ],
     "LivePortraitWarpingSpadeFix": [
-        ToggleDef("FaceExpressionEnableBothToggle", ToggleScope.PER_FACE),
+        _EXPR_NOT_RECAST,
         ToggleDef("AutoMouthExpressionEnableToggle", ToggleScope.PER_FACE),
         ToggleDef("FaceEditorEnableToggle", ToggleScope.PER_FACE),
         ToggleDef("FaceMakeupEnableToggle", ToggleScope.PER_FACE),
@@ -201,16 +225,16 @@ MODELS_TOGGLE_MAP: Dict[str, List[ToggleDef]] = {
         ToggleDef("LipsMakeupEnableToggle", ToggleScope.PER_FACE),
     ],
     "PerformRecastAppearanceFeatureExtractor": [
-        ToggleDef("FaceExpressionEnableBothToggle", ToggleScope.PER_FACE)
+        _EXPR_RECAST_ONLY
     ],
     "PerformRecastMotionExtractor": [
-        ToggleDef("FaceExpressionEnableBothToggle", ToggleScope.PER_FACE)
+        _EXPR_RECAST_ONLY
     ],
     "PerformRecastWarpingModule": [
-        ToggleDef("FaceExpressionEnableBothToggle", ToggleScope.PER_FACE)
+        _EXPR_RECAST_ONLY
     ],
     "PerformRecastSpadeGenerator": [
-        ToggleDef("FaceExpressionEnableBothToggle", ToggleScope.PER_FACE)
+        _EXPR_RECAST_ONLY
     ],
 }
 

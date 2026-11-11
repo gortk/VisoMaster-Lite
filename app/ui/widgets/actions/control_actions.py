@@ -758,6 +758,78 @@ def handle_face_expression_toggle_change(
     _check_and_manage_face_editor_models(main_window)
 
 
+def _purge_inactive_expression_backend(main_window: "MainWindow") -> None:
+    """Releases the models of the Expression Restorer back-end no face uses anymore.
+
+    The restorer has two back-ends chosen per face: LivePortrait (Simple/Advanced)
+    and PerformRecast (Recast). After switching modes the other back-end's models
+    would otherwise stay in VRAM for the rest of the session. A back-end is only
+    released when none of its models is still needed by any face or by another
+    feature (LivePortrait is also used by Face Editor, Auto Mouth and makeups).
+    """
+    if getattr(main_window, "_face_editor_unload_in_flight", False):
+        return
+    if getattr(main_window, "_expression_backend_unload_in_flight", False):
+        return
+
+    models_processor = main_window.models_processor
+    function_worker = main_window.function_worker
+
+    recast_names = list(function_worker.perform_recast.model_group)
+    lp_names = [
+        name
+        for names in function_worker.face_editors.editor_models.values()
+        for name in names
+    ]
+
+    recast_loaded = any(models_processor.models.get(n) is not None for n in recast_names)
+    lp_loaded = any(models_processor.models.get(n) is not None for n in lp_names)
+
+    drop_recast = recast_loaded and not any(
+        models_processor.is_model_active_in_ui(n) for n in recast_names
+    )
+    drop_lp = lp_loaded and not any(
+        models_processor.is_model_active_in_ui(n) for n in lp_names
+    )
+    if not (drop_recast or drop_lp):
+        return
+
+    main_window._expression_backend_unload_in_flight = True
+
+    def _worker():
+        if drop_lp:
+            function_worker.unload_face_editor_models()
+        if drop_recast:
+            function_worker.unload_perform_recast_models()
+        return True
+
+    def _finish(_result):
+        main_window._expression_backend_unload_in_flight = False
+        common_widget_actions.update_gpu_memory_progressbar(main_window)
+
+    def _err(exc):
+        main_window._expression_backend_unload_in_flight = False
+        print(f"[ERROR] unload expression back-end models: {exc}")
+        import traceback
+
+        traceback.print_exc()
+        common_widget_actions.update_gpu_memory_progressbar(main_window)
+
+    main_window.ui_task_runner.submit(_worker, on_done=_finish, on_err=_err)
+
+
+def handle_face_expression_mode_change(
+    main_window: "MainWindow", new_value: str, control_name: str
+):
+    """Called when 'FaceExpressionModeSelection' changes (Simple/Advanced <-> Recast).
+
+    Keeps the existing overall-state check and additionally frees the models of the
+    back-end that is no longer selected on any face.
+    """
+    _check_and_manage_face_editor_models(main_window)
+    _purge_inactive_expression_backend(main_window)
+
+
 def _set_parameter_toggle_state(
     main_window: "MainWindow", parameter_name: str, value: bool
 ) -> bool:
