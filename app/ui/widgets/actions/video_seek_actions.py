@@ -57,6 +57,15 @@ class TimelineSeekSlider(QtWidgets.QSlider):
         self._brush_segment_drag = QtGui.QBrush(QtGui.QColor(156, 39, 176, 60))
         self._drag_start_frame = None
         self._drag_current_frame = None
+        self._hover_segment_index = None
+        self._resize_segment_index = None
+        self._resize_edge = None
+        self._move_segment_index = None
+        self._move_orig_start = None
+        self._move_orig_end = None
+        self._move_drag_start_frame = None
+        self._resize_border_px = 5
+        self.setMouseTracking(True)
 
     def setup(self, main_window: "MainWindow"):
         """Injects the main window dependency after UI creation."""
@@ -257,6 +266,35 @@ class TimelineSeekSlider(QtWidgets.QSlider):
         ratio = min(max(ratio, 0.0), 1.0)
         return int(self.minimum() + ratio * (self.maximum() - self.minimum()))
 
+    def _x_for_frame(self, frame: int) -> float:
+        style = self.style()
+        opt = QtWidgets.QStyleOptionSlider()
+        self.initStyleOption(opt)
+        groove = style.subControlRect(
+            QtWidgets.QStyle.ComplexControl.CC_Slider,
+            opt,
+            QtWidgets.QStyle.SubControl.SC_SliderGroove,
+        )
+        if groove.width() <= 0:
+            return float(groove.left())
+        span = max(1, self.maximum() - self.minimum())
+        ratio = (frame - self.minimum()) / span
+        return float(groove.left() + ratio * groove.width())
+
+    def _border_at_x(self, x: float):
+        if self.main_window is None:
+            return None
+        segments = getattr(self.main_window, "segments", [])
+        if not segments:
+            return None
+        thr = self._resize_border_px
+        for i, seg in enumerate(segments):
+            if abs(x - self._x_for_frame(int(seg["start"]))) <= thr:
+                return (i, "start")
+            if abs(x - self._x_for_frame(int(seg["end"]))) <= thr:
+                return (i, "end")
+        return None
+
     def _segment_at_x(self, x: float):
         if self.main_window is None:
             return None
@@ -269,7 +307,59 @@ class TimelineSeekSlider(QtWidgets.QSlider):
                 return i
         return None
 
+    def leaveEvent(self, event):
+        if self._hover_segment_index is not None:
+            self._hover_segment_index = None
+            self.update()
+        super().leaveEvent(event)
+
+    def _draw_frame_flag(self, painter, x, text, anchor_left):
+        font = QtGui.QFont("Arial", 8)
+        font.setBold(True)
+        fm = QtGui.QFontMetrics(font)
+        text_w = fm.horizontalAdvance(text)
+        text_h = fm.height()
+        w = text_w + 10
+        h = text_h + 4
+        y = self.height() - h - 2
+        if y < 0:
+            y = 0
+        if anchor_left:
+            rx = int(x) + 2
+        else:
+            rx = int(x) - w - 2
+        if rx < 0:
+            rx = 0
+        if rx + w > self.width():
+            rx = max(0, self.width() - w)
+        rect = QtCore.QRect(rx, y, w, h)
+        painter.setFont(font)
+        painter.setPen(QtGui.QPen(QtGui.QColor("#5a5a5a"), 1))
+        painter.setBrush(QtGui.QBrush(QtGui.QColor(44, 44, 44, 240)))
+        painter.drawRoundedRect(rect, 3, 3)
+        painter.setPen(QtGui.QColor("#e0e0e0"))
+        painter.drawText(rect, QtCore.Qt.AlignmentFlag.AlignCenter, text)
+
     def mousePressEvent(self, event):
+        if self.main_window is not None and self.maximum() > self.minimum():
+            if event.button() == QtCore.Qt.MouseButton.MiddleButton:
+                idx = self._segment_at_x(event.position().x())
+                if idx is not None:
+                    segs = self.main_window.segments
+                    self._move_segment_index = idx
+                    self._move_orig_start = int(segs[idx]["start"])
+                    self._move_orig_end = int(segs[idx]["end"])
+                    self._move_drag_start_frame = self._frame_for_x(event.position().x())
+                    self.setCursor(QtCore.Qt.CursorShape.ClosedHandCursor)
+                    event.accept()
+                    return
+            elif event.button() == QtCore.Qt.MouseButton.LeftButton:
+                hit = self._border_at_x(event.position().x())
+                if hit is not None:
+                    self._resize_segment_index, self._resize_edge = hit
+                    self.setCursor(QtCore.Qt.CursorShape.SizeHorCursor)
+                    event.accept()
+                    return
         if self._segment_creation_active() and event.button() == QtCore.Qt.MouseButton.LeftButton:
             frame = self._frame_for_x(event.position().x())
             self._drag_start_frame = frame
@@ -285,9 +375,69 @@ class TimelineSeekSlider(QtWidgets.QSlider):
             self.update()
             event.accept()
             return
+        if self._move_segment_index is not None and self.main_window is not None:
+            curr = self._frame_for_x(event.position().x())
+            delta = curr - self._move_drag_start_frame
+            segs = self.main_window.segments
+            if 0 <= self._move_segment_index < len(segs):
+                seg = segs[self._move_segment_index]
+                seg_len = self._move_orig_end - self._move_orig_start
+                new_start = self._move_orig_start + delta
+                if new_start < 0:
+                    new_start = 0
+                if new_start + seg_len > self.maximum():
+                    new_start = self.maximum() - seg_len
+                seg["start"] = new_start
+                seg["end"] = new_start + seg_len
+                self.update()
+            event.accept()
+            return
+        if self._resize_segment_index is not None and self.main_window is not None:
+            curr = self._frame_for_x(event.position().x())
+            segs = self.main_window.segments
+            if 0 <= self._resize_segment_index < len(segs):
+                seg = segs[self._resize_segment_index]
+                if self._resize_edge == "start":
+                    seg["start"] = max(0, min(curr, int(seg["end"]) - 1))
+                else:
+                    seg["end"] = min(self.maximum(), max(curr, int(seg["start"]) + 1))
+                self.update()
+            event.accept()
+            return
+        if self.main_window is not None and self.maximum() > self.minimum():
+            hit = self._border_at_x(event.position().x())
+            if hit is not None:
+                self.setCursor(QtCore.Qt.CursorShape.SizeHorCursor)
+            else:
+                self.unsetCursor()
+        if self.main_window is not None:
+            new_hover = self._segment_at_x(event.position().x())
+            if new_hover != self._hover_segment_index:
+                self._hover_segment_index = new_hover
+                self.update()
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event):
+        if self._move_segment_index is not None:
+            self._move_segment_index = None
+            self._move_orig_start = None
+            self._move_orig_end = None
+            self._move_drag_start_frame = None
+            self._drag_start_frame = None
+            self._drag_current_frame = None
+            self.unsetCursor()
+            self.update()
+            event.accept()
+            return
+        if self._resize_segment_index is not None:
+            self._resize_segment_index = None
+            self._resize_edge = None
+            self._drag_start_frame = None
+            self._drag_current_frame = None
+            self.unsetCursor()
+            self.update()
+            event.accept()
+            return
         if self._segment_creation_active() and self._drag_start_frame is not None and event.button() == QtCore.Qt.MouseButton.LeftButton:
             end_frame = self._frame_for_x(event.position().x())
             start = min(self._drag_start_frame, end_frame)
@@ -475,19 +625,75 @@ class TimelineSeekSlider(QtWidgets.QSlider):
                 )
 
         # 7. Drag preview
-        if self._drag_start_frame is not None and self._drag_current_frame is not None:
-            painter.setPen(self._pen_segment_drag)
-            painter.setBrush(self._brush_segment_drag)
-            start_x = marker_x_for_value(min(self._drag_start_frame, self._drag_current_frame))
-            end_x = marker_x_for_value(max(self._drag_start_frame, self._drag_current_frame))
+        _hl_pen = QtGui.QPen(QtGui.QColor("#ff9800"), 2)
+        _int_segs = (
+            getattr(self.main_window, "segments", [])
+            if self.main_window is not None
+            else []
+        )
+        if (
+            self._resize_segment_index is not None
+            and 0 <= self._resize_segment_index < len(_int_segs)
+        ):
+            _rs = _int_segs[self._resize_segment_index]
+            _rs_x = marker_x_for_value(int(_rs["start"]))
+            _re_x = marker_x_for_value(int(_rs["end"]))
+            painter.setPen(_hl_pen)
+            if self._resize_edge == "start":
+                painter.drawLine(
+                    int(_rs_x), groove_rect.top() - 3, int(_rs_x), groove_rect.bottom() + 3
+                )
+            else:
+                painter.drawLine(
+                    int(_re_x), groove_rect.top() - 3, int(_re_x), groove_rect.bottom() + 3
+                )
+            self._draw_frame_flag(painter, _rs_x, str(int(_rs["start"])), anchor_left=True)
+            self._draw_frame_flag(painter, _re_x, str(int(_rs["end"])), anchor_left=False)
+        elif (
+            self._move_segment_index is not None
+            and 0 <= self._move_segment_index < len(_int_segs)
+        ):
+            _ms = _int_segs[self._move_segment_index]
+            _ms_x = marker_x_for_value(int(_ms["start"]))
+            _me_x = marker_x_for_value(int(_ms["end"]))
+            painter.setPen(_hl_pen)
+            painter.setBrush(QtCore.Qt.BrushStyle.NoBrush)
             painter.drawRect(
                 QtCore.QRect(
-                    int(start_x),
+                    int(_ms_x),
                     groove_rect.top(),
-                    max(1, int(end_x - start_x)),
+                    max(1, int(_me_x - _ms_x)),
                     groove_rect.bottom() - groove_rect.top(),
                 )
             )
+            self._draw_frame_flag(painter, _ms_x, str(int(_ms["start"])), anchor_left=True)
+            self._draw_frame_flag(painter, _me_x, str(int(_ms["end"])), anchor_left=False)
+        elif self._drag_start_frame is not None and self._drag_current_frame is not None:
+            painter.setPen(self._pen_segment_drag)
+            painter.setBrush(self._brush_segment_drag)
+            _drag_lo = min(self._drag_start_frame, self._drag_current_frame)
+            _drag_hi = max(self._drag_start_frame, self._drag_current_frame)
+            _drag_start_x = marker_x_for_value(_drag_lo)
+            _drag_end_x = marker_x_for_value(_drag_hi)
+            painter.drawRect(
+                QtCore.QRect(
+                    int(_drag_start_x),
+                    groove_rect.top(),
+                    max(1, int(_drag_end_x - _drag_start_x)),
+                    groove_rect.bottom() - groove_rect.top(),
+                )
+            )
+            painter.setBrush(QtCore.Qt.BrushStyle.NoBrush)
+            self._draw_frame_flag(painter, _drag_start_x, str(_drag_lo), anchor_left=True)
+            self._draw_frame_flag(painter, _drag_end_x, str(_drag_hi), anchor_left=False)
+        elif self._hover_segment_index is not None:
+            _hover_segs = getattr(self.main_window, "segments", [])
+            if 0 <= self._hover_segment_index < len(_hover_segs):
+                _hs = _hover_segs[self._hover_segment_index]
+                _hs_x = marker_x_for_value(int(_hs["start"]))
+                _he_x = marker_x_for_value(int(_hs["end"]))
+                self._draw_frame_flag(painter, _hs_x, str(int(_hs["start"])), anchor_left=True)
+                self._draw_frame_flag(painter, _he_x, str(int(_hs["end"])), anchor_left=False)
 
         painter.setBrush(QtCore.Qt.BrushStyle.NoBrush)
 
