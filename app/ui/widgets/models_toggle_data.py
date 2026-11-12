@@ -22,6 +22,7 @@ class ToggleDef:
     selection_key: str | None = None
     selection_equals: str | None = None
     selection_not_equals: str | None = None
+    requires_toggle: str | None = None
 
 
 # The Face Expression Restorer has two back-ends that are chosen per face with
@@ -191,7 +192,11 @@ MODELS_TOGGLE_MAP: Dict[str, List[ToggleDef]] = {
         ToggleDef("EyeBrowsMakeupEnableToggle", ToggleScope.PER_FACE),
         ToggleDef("LipsMakeupEnableToggle", ToggleScope.PER_FACE),
         ToggleDef(
-            "FaceExpressionRetargetingEyesBothEnableToggle", ToggleScope.PER_FACE
+            "FaceExpressionRetargetingEyesBothEnableToggle",
+            ToggleScope.PER_FACE,
+            selection_key="FaceExpressionModeSelection",
+            selection_equals="Advanced",
+            requires_toggle="FaceExpressionEnableBothToggle",
         ),
     ],
     "LivePortraitStitchingLip": [
@@ -203,7 +208,11 @@ MODELS_TOGGLE_MAP: Dict[str, List[ToggleDef]] = {
         ToggleDef("EyeBrowsMakeupEnableToggle", ToggleScope.PER_FACE),
         ToggleDef("LipsMakeupEnableToggle", ToggleScope.PER_FACE),
         ToggleDef(
-            "FaceExpressionRetargetingLipsBothEnableToggle", ToggleScope.PER_FACE
+            "FaceExpressionRetargetingLipsBothEnableToggle",
+            ToggleScope.PER_FACE,
+            selection_key="FaceExpressionModeSelection",
+            selection_equals="Advanced",
+            requires_toggle="FaceExpressionEnableBothToggle",
         ),
     ],
     "LivePortraitWarpingSpade": [

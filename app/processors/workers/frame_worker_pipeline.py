@@ -1030,7 +1030,39 @@ class PipelineProcessor:
         swap = self.worker.t512(output)
         return swap, prev_face
 
+    _BORDER_MASK_KEYS = (
+        "BordermaskEnableToggle",
+        "BorderTopSlider",
+        "BorderLeftSlider",
+        "BorderRightSlider",
+        "BorderBottomSlider",
+        "TopBorderBlurSlider",
+        "BottomBorderBlurSlider",
+        "LeftBorderBlurSlider",
+        "RightBorderBlurSlider",
+    )
+    _border_mask_cache: dict = {}
+
     def get_border_mask(self, parameters: dict) -> tuple[torch.Tensor, torch.Tensor]:
+        # The border masks depend only on these slider values, so cache them
+        # instead of rebuilding 4 gaussian blurs per face per frame.
+        # Callers never modify the returned tensors in place.
+        device = self.worker.models_processor.device
+        cache_key = (str(device),) + tuple(
+            parameters.get(k) for k in self._BORDER_MASK_KEYS
+        )
+        cached = PipelineProcessor._border_mask_cache.get(cache_key)
+        if cached is not None:
+            return cached
+        result = self._build_border_mask(parameters)
+        if len(PipelineProcessor._border_mask_cache) > 32:
+            PipelineProcessor._border_mask_cache.clear()
+        PipelineProcessor._border_mask_cache[cache_key] = result
+        return result
+
+    def _build_border_mask(
+        self, parameters: dict
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         device = self.worker.models_processor.device
 
         base_mask = torch.ones((1, 128, 128), dtype=torch.float32, device=device)

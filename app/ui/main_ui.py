@@ -476,6 +476,10 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
         self.swapfacesButton.clicked.connect(
             partial(video_control_actions.process_swap_faces, self)
         )
+        # Free Recast/LivePortrait models when no face button needs them any more
+        self.swapfacesButton.clicked.connect(
+            partial(control_actions.handle_face_editor_button_click, self)
+        )
         self.editFacesButton.clicked.connect(
             partial(video_control_actions.process_edit_faces, self)
         )

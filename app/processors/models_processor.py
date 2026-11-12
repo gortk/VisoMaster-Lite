@@ -84,6 +84,29 @@ onnxruntime.log_verbosity_level = -1
 # the progress dialog while the build runs.
 
 
+# Per-face toggles the pipeline only honours while the master "Edit Faces" button is on.
+_EDIT_BUTTON_GATED_TOGGLES = frozenset(
+    {
+        "FaceEditorEnableToggle",
+        "FaceMakeupEnableToggle",
+        "HairMakeupEnableToggle",
+        "EyeBrowsMakeupEnableToggle",
+        "LipsMakeupEnableToggle",
+    }
+)
+# Toggles that only run when the face pipeline runs at all, i.e. while the
+# "Swap Faces" OR the "Edit Faces" button is on (expression restorer incl. Recast,
+# auto mouth, retargeting).
+_PIPELINE_GATED_TOGGLES = frozenset(
+    {
+        "FaceExpressionEnableBothToggle",
+        "AutoMouthExpressionEnableToggle",
+        "FaceExpressionRetargetingEyesBothEnableToggle",
+        "FaceExpressionRetargetingLipsBothEnableToggle",
+    }
+)
+
+
 class ModelsProcessor(QtCore.QObject):
     """
     Central hub for managing AI models (ONNX, TensorRT, PyTorch).
@@ -1301,11 +1324,20 @@ class ModelsProcessor(QtCore.QObject):
 
                 if model_instance is not None:
                     print(f"[INFO] Unloading ONNX model: {canonical_name}")
+                    # Diagnostics: a weak reference tells us whether the session is
+                    # really destroyed (and its VRAM freed) after the unload below.
+                    try:
+                        import weakref
+
+                        _session_ref = weakref.ref(model_instance)
+                    except TypeError:
+                        _session_ref = None
                     # MP-06: set dict entry to None first, then del the instance
                     self.models[canonical_name] = None
                     # Explicitly delete the object to trigger its __del__ method
                     del model_instance
                     unloaded = True
+                    self._pending_unload_check = (canonical_name, _session_ref)
                 else:
                     self.models[canonical_name] = None
 
@@ -1313,6 +1345,37 @@ class ModelsProcessor(QtCore.QObject):
                 gc.collect()
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
+                self._report_if_session_still_alive()
+
+    def _report_if_session_still_alive(self) -> None:
+        """Logs who still references a session that was just unloaded (if any)."""
+        pending = getattr(self, "_pending_unload_check", None)
+        self._pending_unload_check = None
+        if not pending:
+            return
+        name, ref = pending
+        if ref is None:
+            return
+        obj = ref()
+        if obj is None:
+            print(f"[INFO] Unload check: '{name}' session was released.")
+            return
+        try:
+            holders = []
+            for r in gc.get_referrers(obj):
+                if r is obj or type(r).__name__ == "frame":
+                    continue
+                desc = type(r).__name__
+                if isinstance(r, dict):
+                    keys = [str(k) for k in list(r.keys())[:6]]
+                    desc += f" keys={keys}"
+                holders.append(desc)
+            print(
+                f"[WARN] Unload check: '{name}' session is STILL ALIVE after unload; "
+                f"held by: {holders or 'unknown (native/thread-local reference)'}"
+            )
+        finally:
+            del obj
 
     def purge_unused_restorers(self) -> None:
         """
@@ -1450,13 +1513,37 @@ class ModelsProcessor(QtCore.QObject):
         if not toggles:
             return True  # Core models without UI toggles are always assumed needed
 
+        # Toggles the frame pipeline only honours while the master "Edit Faces"
+        # button is on (see edit_enabled in frame_worker_pipeline). With the
+        # button off they must not keep their models in VRAM.
+        edit_button_on = True
+        swap_button_on = True
+        try:
+            _btn = getattr(self.main_window, "editFacesButton", None)
+            if _btn is not None:
+                edit_button_on = bool(_btn.isChecked())
+            _sbtn = getattr(self.main_window, "swapfacesButton", None)
+            if _sbtn is not None:
+                swap_button_on = bool(_sbtn.isChecked())
+        except Exception:
+            edit_button_on = swap_button_on = True
+        pipeline_on = edit_button_on or swap_button_on
+
         def _toggle_counts(source: Any, toggle: Any) -> bool:
             """True when the toggle is on in ``source`` AND its optional selection
             gate (e.g. Expression Mode == Recast) matches in the same dict."""
+            if toggle.key in _EDIT_BUTTON_GATED_TOGGLES and not edit_button_on:
+                return False
+            if toggle.key in _PIPELINE_GATED_TOGGLES and not pipeline_on:
+                return False
             if not hasattr(source, "get") or not _is_truthy(
                 source.get(toggle.key, False)
             ):
                 return False
+            requires_toggle = getattr(toggle, "requires_toggle", None)
+            if requires_toggle is not None:
+                if not _is_truthy(source.get(requires_toggle, False)):
+                    return False
             sel_key = getattr(toggle, "selection_key", None)
             if sel_key is None:
                 return True

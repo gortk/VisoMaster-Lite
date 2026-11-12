@@ -1,3 +1,7 @@
+### 1.0.6
+
+- Fixed "Edit Faces" toggle not unloading its models when turning it OFF.
+
 ### 1.0.5
 
 - Fixed the annoying toast "Cannot auto-load target media while an issue scan is running" when the

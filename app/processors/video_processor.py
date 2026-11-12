@@ -709,7 +709,7 @@ class VideoProcessor(QObject):
             raw_segments = getattr(self.main_window, "segments", [])
             valid_pairs = []
             for seg in raw_segments:
-                if seg.get("kind") == "normal" and int(seg["start"]) < int(seg["end"]):
+                if seg.get("kind") == "recording" and int(seg["start"]) < int(seg["end"]):
                     valid_pairs.append((int(seg["start"]), int(seg["end"])))
 
             valid_pairs = video_control_actions.apply_exclude_segments(

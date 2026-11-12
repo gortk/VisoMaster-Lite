@@ -114,11 +114,15 @@ class FaceEditors:
         return pickle.loads(file_bytes)
 
     def unload_models(self):
-        if self.current_face_editor_type:
-            models_to_unload = self.editor_models.get(self.current_face_editor_type, [])
-            for model_name in models_to_unload:
-                self.models_processor.unload_model(model_name)
-            self.current_face_editor_type = None
+        # Unload every editor model, not only those of the current type: models can be
+        # loaded (e.g. by makeups / auto mouth) while current_face_editor_type is
+        # still None, and unloading an already-unloaded model is a no-op.
+        names = []
+        for group in self.editor_models.values():
+            names.extend(n for n in group if n not in names)
+        for model_name in names:
+            self.models_processor.unload_model(model_name)
+        self.current_face_editor_type = None
 
     def _manage_editor_models(self, face_editor_type: str):
         """

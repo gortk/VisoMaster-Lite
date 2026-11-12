@@ -678,57 +678,15 @@ def handle_enhancer_model_selection_change(
     common_widget_actions.update_gpu_memory_progressbar(main_window)
 
 def _check_and_manage_face_editor_models(main_window: "MainWindow") -> None:
-    models_processor = main_window.models_processor
-    function_worker = main_window.function_worker
+    """Frees LivePortrait / PerformRecast models that nothing needs any more.
 
-    is_edit_face_active = main_window.editFacesButton.isChecked()
-    is_face_editor_param_active = main_window.current_widget_parameters.get(
-        "FaceEditorEnableToggle", False
-    )
-    is_expr_restore_active = main_window.current_widget_parameters.get(
-        "FaceExpressionEnableBothToggle", False
-    )
+    Each back-end is released independently, using the live UI state (which
+    honours the Edit Faces button). The old all-or-nothing check kept the
+    Face Editor models in VRAM whenever the Expression Restorer was on, even
+    with Edit Faces switched off.
+    """
+    _purge_inactive_expression_backend(main_window)
 
-    true_edit_active = is_edit_face_active and is_face_editor_param_active
-    any_editor_feature_active = true_edit_active or is_expr_restore_active
-
-    recast_loaded = any(
-        models_processor.models.get(m) is not None
-        for m in function_worker.perform_recast.model_group
-    )
-    models_are_currently_loaded = (
-        function_worker.face_editors.current_face_editor_type is not None
-        or recast_loaded
-    )
-
-    if any_editor_feature_active and not models_are_currently_loaded:
-        print("[INFO] Face Editor/Expression Restorer is active. Models will be lazy-loaded on use.")
-        return
-
-    if not any_editor_feature_active and models_are_currently_loaded:
-        if getattr(main_window, "_face_editor_unload_in_flight", False):
-            return
-        main_window._face_editor_unload_in_flight = True
-        captured_recast = recast_loaded
-
-        def _worker():
-            function_worker.unload_face_editor_models()
-            if captured_recast:
-                function_worker.unload_perform_recast_models()
-            return True
-
-        def _finish(_result):
-            main_window._face_editor_unload_in_flight = False
-            common_widget_actions.update_gpu_memory_progressbar(main_window)
-
-        def _err(exc):
-            main_window._face_editor_unload_in_flight = False
-            print(f"[ERROR] unload face editor models: {exc}")
-            import traceback
-            traceback.print_exc()
-            common_widget_actions.update_gpu_memory_progressbar(main_window)
-
-        main_window.ui_task_runner.submit(_worker, on_done=_finish, on_err=_err)
 
 def handle_face_editor_button_click(main_window: "MainWindow"):
     """Called when the 'Edit Faces' button is clicked."""
@@ -790,6 +748,15 @@ def _purge_inactive_expression_backend(main_window: "MainWindow") -> None:
     )
     drop_lp = lp_loaded and not any(
         models_processor.is_model_active_in_ui(n) for n in lp_names
+    )
+    print(
+        "[INFO] Editor-model check: "
+        f"swap={main_window.swapfacesButton.isChecked()} "
+        f"edit={main_window.editFacesButton.isChecked()} "
+        f"recast_loaded={recast_loaded} (drop={drop_recast}) "
+        f"lp_loaded={lp_loaded} (drop={drop_lp}) "
+        f"keep_alive={main_window.control.get('KeepModelsAliveToggle', False)} "
+        f"playing={getattr(main_window.video_processor, 'processing', False)}"
     )
     if not (drop_recast or drop_lp):
         return

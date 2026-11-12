@@ -1775,12 +1775,6 @@ def record_video(main_window: "MainWindow", checked: bool):
             for s in getattr(main_window, "segments", [])
             if s.get("kind") == "recording" and s["end"] > s["start"]
         ]
-        if not segments:
-            segments = [
-                (int(s["start"]), int(s["end"]))
-                for s in getattr(main_window, "segments", [])
-                if s.get("kind") == "normal" and s["end"] > s["start"]
-            ]
         segments = apply_exclude_segments(main_window, segments)
         segments = [(s, e) for s, e in segments if s < e]
         marker_pairs = segments
