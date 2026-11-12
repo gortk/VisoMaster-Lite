@@ -897,6 +897,18 @@ class FrameEdits:
             structural_blend = float(
                 parameters.get("RecastRelativeStructuralBlendDecimalSlider", 0.50)
             )
+            gaze_lock_enabled = bool(
+                parameters.get("RecastGazeLockToggle", False)
+            )
+            gaze_lock_strength = float(
+                parameters.get("RecastGazeLockStrengthDecimalSlider", 0.75)
+            )
+            gaze_h = float(
+                parameters.get("RecastGazeHorizontalOffsetDecimalSlider", 0.0)
+            )
+            gaze_v = float(
+                parameters.get("RecastGazeVerticalOffsetDecimalSlider", 0.0)
+            )
             crop_scale = float(
                 parameters.get("FaceExpressionCropScaleBothDecimalSlider", 1.5)
             )
@@ -1001,6 +1013,10 @@ class FrameEdits:
                 cheeks_driving_weight=cheeks_weight,
                 jaw_driving_weight=jaw_weight,
                 structural_blend=structural_blend,
+                gaze_lock_enabled=gaze_lock_enabled,
+                gaze_lock_strength=gaze_lock_strength,
+                gaze_horizontal_offset=gaze_h,
+                gaze_vertical_offset=gaze_v,
             )
             out = self.function_worker.perform_recast_warp_decode(
                 f_s, source_info["x_s"], x_d_i

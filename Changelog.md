@@ -1,6 +1,9 @@
 ### 1.0.6
 
 - Fixed "Edit Faces" toggle not unloading its models when turning it OFF.
+- Added new "Camera Gaze Lock" for recast mode, this saves you from having to turn on face editor
+  just to fix badly detected pupils. Don't expect this to make your videos magically always gaze
+  to the camera, as its more like a manual fix when required.
 
 ### 1.0.5
 

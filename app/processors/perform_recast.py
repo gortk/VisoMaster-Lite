@@ -453,33 +453,11 @@ class PerformRecast:
         cheeks_driving_weight: float = 0.20,
         jaw_driving_weight: float = 0.15,
         structural_blend: float = 0.0,
+        gaze_lock_enabled: bool = False,
+        gaze_lock_strength: float = 0.75,
+        gaze_horizontal_offset: float = 0.0,
+        gaze_vertical_offset: float = 0.0,
     ) -> torch.Tensor:
-        """Build the driven keypoints ``x_d_i`` fed to the warping module.
-        Args:
-            source_info: output of :meth:`build_source_info` (the swapped face).
-            exp_d: driving expression (1,N,3) from the original face's motion.
-            mode: ``"Replacement"`` or ``"Enhancement"`` or ``"Advanced"``.
-            factor: expression strength. 0 keeps the source expression, 1 applies
-                the full transfer; values >1 exaggerate it.
-            region: ``"all"`` | ``"eyes"`` | ``"lips"`` — restrict where the
-                driving expression is applied (source expression kept elsewhere).
-            eye_driving_weight: in Replacement mode, how strongly the driver
-                overrides the source eye-channel identity (0 keeps source eyes,
-                1 fully follows the driver). Upstream default 0.7.
-            lip_driving_weight: same, for the lip/jaw channels. Upstream
-                default 0.8.
-        Mode semantics:
-          * Replacement — ``factor=1`` yields the driver's expression with the
-            swapped face's eye/lip identity blended back (``eye/lip_driving_weight``).
-            ``factor`` interpolates source -> that target.
-          * Enhancement — adds the driver's expression on top of the swapped
-            face's own expression (``exp_s + factor*exp_d``); ``factor=0`` keeps
-            the source, higher values stack/boost the driver's expression.
-        The upstream video pipeline uses the driving video's first frame as a
-        neutral reference; VisoMaster is stateless per frame, so Enhancement
-        treats the implicit keypoint ``exp_d`` (already a delta from the
-        canonical keypoints) as the additive delta directly.
-        """
         x_s_c = source_info["kp"]
         exp_s = source_info["exp"]
         R = source_info["R"]
@@ -544,19 +522,6 @@ class PerformRecast:
             new_exp = exp_s + (global_delta * weights_3d)
 
         elif mode == MODE_ENHANCEMENT:
-            # ENHANCEMENT = keep the swapped face's own expression and ADD the
-            # driving expression on top of it (scaled by `factor`). This is
-            # genuinely additive, so it stays distinct from Replacement (which
-            # *replaces* the expression with the driver's). The implicit keypoint
-            # `exp` is already a delta from the canonical keypoints, so the
-            # driver's `exp_d` acts as the additive expression delta directly —
-            # no explicit neutral-reference frame is needed.
-            #
-            # (Previously this used `exp_s + factor*(exp_d - exp_s)`, i.e. the
-            # source's own expression as the neutral reference. At factor=1 that
-            # cancels `exp_s` and collapses to `exp_d` — making Enhancement
-            # nearly identical to Replacement, which is why switching modes
-            # appeared to do nothing.)
             new_exp = exp_s + factor * exp_d
         else:
             raise ValueError(f"Unsupported recast mode: {mode!r}")
@@ -568,6 +533,15 @@ class PerformRecast:
             gated[:, indices, :] = new_exp[:, indices, :]
             new_exp = gated
 
+        if gaze_lock_enabled and gaze_lock_strength > 0.0:
+            new_exp = self._apply_gaze_lock(
+                new_exp,
+                exp_s,
+                gaze_lock_strength,
+                gaze_horizontal_offset,
+                gaze_vertical_offset,
+            )
+
         kp_e = x_s_c + new_exp
 
         # OPTIMIZED: Direct Matmul is faster than Einsum string parsing.
@@ -577,3 +551,28 @@ class PerformRecast:
         x_d_i = kp_rotated + t.unsqueeze(1)
 
         return x_d_i
+
+    @torch.no_grad()
+    def _apply_gaze_lock(
+        self,
+        new_exp: torch.Tensor,
+        exp_s: torch.Tensor,
+        strength: float,
+        horizontal_offset: float,
+        vertical_offset: float,
+    ) -> torch.Tensor:
+        strength = max(0.0, min(1.0, float(strength)))
+        eye_indices = self.EYE_INDICES
+        eye_new = new_exp[:, eye_indices, :]
+        eye_src = exp_s[:, eye_indices, :]
+        blended = torch.lerp(eye_new, eye_src, strength)
+        if horizontal_offset != 0.0 or vertical_offset != 0.0:
+            offset_vec = torch.tensor(
+                [horizontal_offset * 0.035, vertical_offset * 0.020, 0.0],
+                dtype=blended.dtype,
+                device=blended.device,
+            )
+            blended = blended + offset_vec
+        result = new_exp.clone()
+        result[:, eye_indices, :] = blended
+        return result
