@@ -1,6 +1,6 @@
 # VisoMaster-Lite
 
-VisoMaster-Lite is a desktop application for AI-powered face swapping, enhancement, and editing on images and videos. It combines a graphical workflow with advanced model controls, batch processing, VR180 support, and GPU-accelerated inference. 
+VisoMaster-Lite is a desktop application for AI-powered face swapping and enhancement on images and videos. It combines a graphical workflow with advanced model controls, batch processing, VR180 support, and GPU-accelerated inference. 
 
 Its father is VisoMaster-Fusion which has a lot of community based features. Some of those features, I personally think that are redundant or doesn't have a use for most people. Since now AI enabled most of us to develop features, everybody is rushing to add its own niche feature and the lack of moderation is turning the app into bloatware slowly but steadily.
 
