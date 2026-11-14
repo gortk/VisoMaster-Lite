@@ -7,7 +7,7 @@
 - Better, more precise seek bar, with frame ruler that adapts to zoom controls.
 - Fixed the seek bar head that was conflicting with the segments so dragging it may cause segments to
   be unwillingly interacted with.
-
+- Better UI rearrangement 
 
 ### 1.0.5
 
