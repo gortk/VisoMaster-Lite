@@ -434,6 +434,13 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
         self.videoFpsLineEdit.setFixedWidth(56)
         self.videoFpsLineEdit.setText("0")
         self.videoFpsLineEdit.setToolTip("Total Frames")
+        
+        self.videoTimeLineEdit.textChanged.connect(
+            lambda _: video_control_actions.update_video_time_line_edit(self)
+        )
+        self.videoFpsLineEdit.textChanged.connect(
+            lambda _: video_control_actions.update_total_frames_line_edit(self)
+        )
 
         # 4. Populate the sub-layouts
         self.boxesLayout.addWidget(self.videoSeekLineEdit)

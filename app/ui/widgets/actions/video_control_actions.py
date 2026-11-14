@@ -114,7 +114,11 @@ def update_total_frames_line_edit(main_window: "MainWindow") -> None:
         return
     vp = getattr(main_window, "video_processor", None)
     max_frame = int(getattr(vp, "max_frame_number", 0) or 0)
-    frames_line_edit.setText(str(max_frame + 1) if max_frame > 0 else "0")
+    expected = str(max_frame + 1) if max_frame > 0 else "0"
+    if frames_line_edit.text() != expected:
+        frames_line_edit.blockSignals(True)
+        frames_line_edit.setText(expected)
+        frames_line_edit.blockSignals(False)
 
 
 def update_video_time_line_edit(
@@ -148,7 +152,12 @@ def update_video_time_line_edit(
     total_frames = int(getattr(vp, "max_frame_number", 0) or 0)
     elapsed_text = _format_mmss(int(current_frame_number))
     total_text = _format_mmss(total_frames)
-    video_time_line_edit.setText(f"{elapsed_text} / {total_text}")
+    expected = f"{elapsed_text} / {total_text}"
+
+    if video_time_line_edit.text() != expected:
+        video_time_line_edit.blockSignals(True)
+        video_time_line_edit.setText(expected)
+        video_time_line_edit.blockSignals(False)
 
     update_total_frames_line_edit(main_window)
 
