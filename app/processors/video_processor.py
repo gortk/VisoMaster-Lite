@@ -33,7 +33,6 @@ from app.ui.widgets.actions import video_control_actions
 from app.ui.widgets.actions import layout_actions
 from app.ui.widgets.actions import list_view_actions
 from app.ui.widgets.actions import save_load_actions
-from app.ui.widgets.settings_layout_data import CAMERA_BACKENDS
 from app.processors.video_utils.video_encoding import FFmpegEncoder, FFmpegPostProcessor
 from app.processors.video_utils.issue_scanner import (
     IssueScanner,

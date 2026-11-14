@@ -972,49 +972,6 @@ def _workspace_after_inputs(main_window, data, data_filename):
         )
     )
 
-    def _load_target_face(face_id, target_face_data):
-        cropped_face = np.array(target_face_data["cropped_face"]).astype("uint8")
-        pixmap = common_widget_actions.get_pixmap_from_frame(main_window, cropped_face)
-        embedding_store = {
-            m: np.array(e) for m, e in target_face_data["embedding_store"].items()
-        }
-        list_view_actions.add_media_thumbnail_to_target_faces_list(
-            main_window, cropped_face, embedding_store, pixmap, face_id
-        )
-        raw_params = data["target_faces_data"][face_id].get("parameters", {})
-        default_params = cast(
-            misc_helpers.ParametersDict, main_window.default_parameters
-        ).data
-        sanitized_params = sanitize_state_dictionary(raw_params, default_params)
-        main_window.parameters[face_id] = convert_parameters_to_supported_type(
-            main_window, sanitized_params, misc_helpers.ParametersDict
-        )
-        embed_buttons = list_view_actions.get_all_merged_embeddings(main_window)
-        for assigned_merged_embedding_id in target_face_data[
-            "assigned_merged_embeddings"
-        ]:
-            if assigned_merged_embedding_id in embed_buttons:
-                main_window.target_faces[face_id].assigned_merged_embeddings[
-                    assigned_merged_embedding_id
-                ] = embed_buttons[assigned_merged_embedding_id].embedding_store
-        for assigned_input_face_id in target_face_data["assigned_input_faces"]:
-            if assigned_input_face_id in main_window.input_faces:
-                main_window.target_faces[face_id].assigned_input_faces[
-                    assigned_input_face_id
-                ] = main_window.input_faces[assigned_input_face_id].embedding_store
-            else:
-                print(
-                    f"[WARN] Input face {assigned_input_face_id} missing from session. "
-                    "Skipping assignment."
-                )
-        main_window.target_faces[face_id].assigned_input_embedding = {
-            m: np.array(e)
-            for m, e in target_face_data["assigned_input_embedding"].items()
-        }
-
-    for face_id, target_face_data in data.get("target_faces_data", {}).items():
-        steps.append(partial(_load_target_face, face_id, target_face_data))
-
     def _restore_markers_controls():
         video_control_actions.remove_all_markers(main_window)
         loaded_segments = data.get("segments")
@@ -1126,14 +1083,6 @@ def _workspace_after_inputs(main_window, data, data_filename):
         main_window.outputFolderLineEdit.setText(output_folder)
 
     steps.append(_restore_markers_controls)
-
-    def _recalc_one(face_id):
-        btn = main_window.target_faces.get(face_id)
-        if btn is not None:
-            btn.calculate_assigned_input_embedding()
-
-    for face_id in data.get("target_faces_data", {}).keys():
-        steps.append(partial(_recalc_one, face_id))
 
     def _restore_tab_order_and_selection():
         if "tab_state" in data:
@@ -1328,7 +1277,6 @@ def save_current_workspace(
 
     resolved_parent_path = str(data_filename)
 
-    target_faces_data = {}
     embeddings_data = {}
     input_faces_data = {}
     target_medias_data = []
@@ -1414,28 +1362,6 @@ def save_current_workspace(
             "kv_map": kv_map_path,
         }
 
-    for face_id, target_face in main_window.target_faces.items():
-        assigned_kv_map_serializable = None
-        target_faces_data[face_id] = {
-            "cropped_face": target_face.cropped_face.tolist(),
-            "embedding_store": {
-                embed_model: embedding.tolist()
-                for embed_model, embedding in target_face.embedding_store.items()
-            },
-            "parameters": main_window.parameters.get(
-                str(face_id), main_window.default_parameters
-            ).data.copy(),
-            "assigned_input_faces": list(target_face.assigned_input_faces.keys()),
-            "assigned_merged_embeddings": list(
-                target_face.assigned_merged_embeddings.keys()
-            ),
-            "assigned_input_embedding": {
-                model: emb.tolist()
-                for model, emb in target_face.assigned_input_embedding.items()
-            },
-            "assigned_kv_map": assigned_kv_map_serializable,
-        }
-
     for embedding_id, embedding_button in list_view_actions.get_all_merged_embeddings(main_window).items():
         kv_map_path = None
         kv_payload_to_save = getattr(embedding_button, "kv_map_list", None) or getattr(
@@ -1506,13 +1432,9 @@ def save_current_workspace(
             main_window.selected_video_button, widget_components.TargetMediaCardButton
         )
         else False,
-        "selected_target_face_id": getattr(
-            main_window, "selected_target_face_id", None
-        ),
         "swap_faces_enabled": main_window.swapfacesButton.isChecked(),
         "edit_faces_enabled": main_window.editFacesButton.isChecked(),
         "input_faces_data": input_faces_data,
-        "target_faces_data": target_faces_data,
         "embeddings_data": embeddings_data,
         "markers": markers_to_save,
         "issue_frames_by_face": {

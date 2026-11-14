@@ -311,14 +311,33 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
         self.videoSeekSlider.setObjectName("videoSeekSlider")
         self.videoSeekSlider.setOrientation(QtCore.Qt.Orientation.Horizontal)
 
-        # 3. Expand the scroll area to fit both the slider and the 40px thumbnails
-        self.timelineScrollArea.setMinimumHeight(85)
-        self.timelineScrollArea.setMaximumHeight(85)
+        # 3. The scroll area height is computed below, once the container is inserted
 
         # 4. Insert the CONTAINER into the UI
         timeline_layout.insertWidget(index, self.timelineContainer)
 
         self.timelineContainer.setup(self)
+
+        # Size the scroll area to exactly fit thumbnails + ruler + slider + the horizontal
+        # scrollbar (shown when zoomed). A fixed height that is too small makes Qt add a
+        # vertical scrollbar as soon as the horizontal one appears (the zoom bug).
+        self.timelineScrollArea.setVerticalScrollBarPolicy(
+            QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
+        # The zoom scrollbar is moved below the timeline (own widget), so it no longer
+        # takes space inside the scroll area.
+        _external_bar = self._install_external_timeline_scrollbar()
+        _timeline_h = (
+            self.timelineContainer.sizeHint().height()
+            + (
+                0
+                if _external_bar
+                else self.timelineScrollArea.horizontalScrollBar().sizeHint().height()
+            )
+            + 2 * self.timelineScrollArea.frameWidth()
+        )
+        self.timelineScrollArea.setMinimumHeight(_timeline_h)
+        self.timelineScrollArea.setMaximumHeight(_timeline_h)
 
         video_slider_event_filter = VideoSeekSliderEventFilter(
             self, self.videoSeekSlider
@@ -368,8 +387,9 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
 
         # Add descriptive label above the boxes
         self.boxesLabel = QtWidgets.QLabel(
-            "Frame | Time | FPS", self.rightSideMediaWidget
+            "Current | Time | Frames", self.rightSideMediaWidget
         )
+        
         self.boxesLabel.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
         font = self.boxesLabel.font()
         font.setPointSize(8)
@@ -399,8 +419,12 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
         self.videoTimeLineEdit.setReadOnly(True)
         self.videoTimeLineEdit.setFocusPolicy(QtCore.Qt.FocusPolicy.NoFocus)
         self.videoTimeLineEdit.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
-        self.videoTimeLineEdit.setMaximumSize(QtCore.QSize(55, 16777215))
-        self.videoTimeLineEdit.setToolTip("Current Time (mm:ss)")
+        # Wide enough for the full "elapsed / total" text (e.g. 000:00 / 000:00).
+        self.videoTimeLineEdit.setFixedWidth(
+            self.videoTimeLineEdit.fontMetrics().horizontalAdvance("000:00 / 000:00")
+            + 28
+        )
+        self.videoTimeLineEdit.setToolTip("Elapsed / Total Time (mm:ss)")
 
         self.videoFpsLineEdit = QtWidgets.QLineEdit(self.rightSideMediaWidget)
         self.videoFpsLineEdit.setObjectName("videoFpsLineEdit")
@@ -408,8 +432,8 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
         self.videoFpsLineEdit.setFocusPolicy(QtCore.Qt.FocusPolicy.NoFocus)
         self.videoFpsLineEdit.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
         self.videoFpsLineEdit.setFixedWidth(56)
-        self.videoFpsLineEdit.setText("0/0")
-        self.videoFpsLineEdit.setToolTip("Source video FPS / measured playback FPS")
+        self.videoFpsLineEdit.setText("0")
+        self.videoFpsLineEdit.setToolTip("Total Frames")
 
         # 4. Populate the sub-layouts
         self.boxesLayout.addWidget(self.videoSeekLineEdit)
@@ -1657,6 +1681,78 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
 
         self._compare_mask_toggle_buttons_installed = True
 
+    def _install_external_timeline_scrollbar(self) -> bool:
+        """Show the zoom scrollbar BELOW the seek bar.
+
+        The scroll area's native horizontal scrollbar is switched off and replaced by a
+        separate QScrollBar placed under the scroll area and kept in sync with it.
+        Returns False (and changes nothing) if the layout can't be wrapped.
+        """
+        if getattr(self, "_timeline_scrollbar", None) is not None:
+            return True
+        sa = self.timelineScrollArea
+        parent = sa.parentWidget()
+        if parent is None:
+            return False
+        parent_layout = None
+        for lay in [parent.layout()] + parent.findChildren(QtWidgets.QLayout):
+            if isinstance(lay, QtWidgets.QBoxLayout) and lay.indexOf(sa) >= 0:
+                parent_layout = lay
+                break
+        if parent_layout is None:
+            return False
+
+        native = sa.horizontalScrollBar()
+        idx = parent_layout.indexOf(sa)
+        # The wrapper must take over the scroll area's "fill the row" behaviour, otherwise
+        # the controls to its right (Frame | Time | FPS, zoom) jump into the middle.
+        stretch = parent_layout.stretch(idx) or 1
+
+        wrapper = QtWidgets.QWidget(parent)
+        wrapper.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Expanding, sa.sizePolicy().verticalPolicy()
+        )
+        wrapper_layout = QtWidgets.QVBoxLayout(wrapper)
+        wrapper_layout.setContentsMargins(0, 0, 0, 0)
+        wrapper_layout.setSpacing(2)
+        bar = QtWidgets.QScrollBar(QtCore.Qt.Orientation.Horizontal, wrapper)
+
+        parent_layout.removeWidget(sa)
+        wrapper_layout.addWidget(sa)
+        wrapper_layout.addWidget(bar)
+        parent_layout.insertWidget(idx, wrapper, stretch)
+
+        sa.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+
+        def refresh(*_):
+            bar.setRange(native.minimum(), native.maximum())
+            bar.setPageStep(native.pageStep())
+            bar.setSingleStep(max(1, native.singleStep()))
+            bar.setValue(native.value())
+            bar.setVisible(
+                native.maximum() > native.minimum() and sa.isVisibleTo(wrapper)
+            )
+
+        native.rangeChanged.connect(refresh)
+        native.valueChanged.connect(bar.setValue)
+        bar.valueChanged.connect(native.setValue)
+
+        class _VisibilityFilter(QtCore.QObject):
+            def eventFilter(self_f, obj, ev):
+                if ev.type() in (
+                    QtCore.QEvent.Type.Show,
+                    QtCore.QEvent.Type.Hide,
+                    QtCore.QEvent.Type.Resize,
+                ):
+                    refresh()
+                return False
+
+        self._timeline_scrollbar_filter = _VisibilityFilter(sa)
+        sa.installEventFilter(self._timeline_scrollbar_filter)
+        self._timeline_scrollbar = bar
+        refresh()
+        return True
+
     def _install_segment_controls(self):
         if getattr(self, "_segment_controls_installed", False):
             return
@@ -2142,10 +2238,16 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
         batch_layout.addWidget(self.batchImageButton)
         batch_layout.addWidget(self.batchallImageButton)
 
-        self.inputEmbeddingsSearchBox.setMaximumWidth(_EMBEDDINGS_SEARCH_MAX_WIDTH)
-        embed_layout.addWidget(
-            self.inputEmbeddingsSearchBox, 0, QtCore.Qt.AlignmentFlag.AlignLeft
-        )
+        self.media_readouts_row_widget = QtWidgets.QWidget()
+        sp = self.media_readouts_row_widget.sizePolicy()
+        sp.setRetainSizeWhenHidden(True)
+        self.media_readouts_row_widget.setSizePolicy(sp)
+        search_row = QtWidgets.QHBoxLayout(self.media_readouts_row_widget)
+        search_row.setContentsMargins(0, 0, 0, 0)
+        search_row.setSpacing(8)
+        self._move_media_readouts_to_row(search_row)
+        search_row.addStretch(1)
+        embed_layout.addWidget(self.media_readouts_row_widget)
 
         # Force a dark background with a gray hover state for all embedding buttons
         btn_style = (
@@ -2172,11 +2274,13 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
 
         add_tab_btn = getattr(self, "embeddingTabAddButton", None)
         if add_tab_btn is not None:
+            add_tab_btn.setText("+ Tab")
             add_tab_btn.setStyleSheet(btn_style)
             add_tab_btn.setFixedHeight(self.saveEmbeddingAsButton.sizeHint().height())
             add_tab_btn.setMinimumWidth(add_tab_btn.sizeHint().width())
             embed_btn_row.addWidget(add_tab_btn)
 
+        embed_btn_row.addWidget(self.inputEmbeddingsSearchBox)
         embed_btn_row.addStretch()
         embed_layout.addLayout(embed_btn_row)
 
@@ -2222,6 +2326,105 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
         self._custom_bottom_layout_applied = True
         QtCore.QTimer.singleShot(0, self.setFocus)
 
+    def _move_media_readouts_to_row(self, row_layout) -> None:
+        old = getattr(self, "rightSideMediaWidget", None)
+        if old is None:
+            return
+        labels = {
+            self.videoSeekLineEdit: "Frame",
+            self.videoTimeLineEdit: "Current/Total Time",
+            self.videoFpsLineEdit: "Total Frames",
+        }
+        widgets = (
+            self.videoSeekLineEdit,
+            self.videoTimeLineEdit,
+            self.videoFpsLineEdit,
+            self.zoomLabel,
+            self.timelineZoomSlider,
+        )
+        tips = {
+            self.videoSeekLineEdit: "Current frame",
+            self.videoFpsLineEdit: "Total frames",
+        }
+        readouts = QtWidgets.QWidget(self)
+        lay = QtWidgets.QHBoxLayout(readouts)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(6)
+        for w in widgets:
+            for old_layout in (self.boxesLayout, self.zoomLayout):
+                old_layout.removeWidget(w)
+
+        small = QtGui.QFont()
+        small.setPointSize(8)
+
+        for w in (
+            self.videoSeekLineEdit,
+            self.videoTimeLineEdit,
+            self.videoFpsLineEdit,
+        ):
+            group = QtWidgets.QWidget(readouts)
+            gl = QtWidgets.QVBoxLayout(group)
+            gl.setContentsMargins(0, 0, 0, 0)
+            gl.setSpacing(1)
+            lbl = QtWidgets.QLabel(labels[w], group)
+            lbl.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+            lbl.setFont(small)
+            gl.addWidget(lbl)
+            gl.addWidget(w)
+            lay.addWidget(group)
+            if w in tips and not w.toolTip():
+                w.setToolTip(tips[w])
+
+        zoom_group = QtWidgets.QWidget(readouts)
+        zl = QtWidgets.QVBoxLayout(zoom_group)
+        zl.setContentsMargins(0, 0, 0, 0)
+        zl.setSpacing(1)
+        self.zoomLabel.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        self.zoomLabel.setFont(small)
+        zl.addWidget(self.zoomLabel)
+        zl.addWidget(self.timelineZoomSlider)
+        lay.addWidget(zoom_group)
+
+        self.zoomLabel.setMinimumWidth(
+            self.zoomLabel.fontMetrics().horizontalAdvance("Zoom - x100.0") + 6
+        )
+        self.timelineZoomSlider.setMinimumWidth(60)
+        self.timelineZoomSlider.setMaximumWidth(110)
+        row_layout.addWidget(
+            readouts,
+            0,
+            QtCore.Qt.AlignmentFlag.AlignLeft | QtCore.Qt.AlignmentFlag.AlignVCenter,
+        )
+
+        self.horizontalLayoutMediaSlider.removeWidget(old)
+        old.hide()
+        old.deleteLater()
+        self.rightSideMediaWidget = readouts
+        self._media_readouts_widget = readouts
+        self.boxesLabel = None
+        self.boxesLayout = self.zoomLayout = self.rightSideMediaLayout = None
+
+        self.videoSeekSlider.rangeChanged.connect(
+            lambda _min, _max: self._update_media_readout_labels_visibility()
+        )
+        self._update_media_readout_labels_visibility()
+
+    def _update_media_readout_labels_visibility(self) -> None:
+        vp = getattr(self, "video_processor", None)
+        visible = (
+            vp is not None
+            and getattr(vp, "file_type", None) == "video"
+            and getattr(vp, "media_capture", None) is not None
+        )
+        if hasattr(self, "_media_readouts_widget"):
+            self._media_readouts_widget.setVisible(visible)
+        if hasattr(self, "media_readouts_row_widget"):
+            if visible and not self.media_readouts_row_widget.isVisible():
+                self.media_readouts_row_widget.setMinimumHeight(self.media_readouts_row_widget.sizeHint().height())
+            self.media_readouts_row_widget.setVisible(visible)
+        if hasattr(self, "timelineScrollArea"):
+            self.timelineScrollArea.setVisible(visible)
+            
     def _give_all_stretch_to(self, widget):
         """In the layout holding `widget`, only that column/item takes extra width."""
         found = self._find_widget_layout(widget)

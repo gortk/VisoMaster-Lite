@@ -108,6 +108,15 @@ def set_up_video_seek_line_edit(main_window: "MainWindow"):
     )  # Restrict input to numbers
 
 
+def update_total_frames_line_edit(main_window: "MainWindow") -> None:
+    frames_line_edit = getattr(main_window, "videoFpsLineEdit", None)
+    if frames_line_edit is None:
+        return
+    vp = getattr(main_window, "video_processor", None)
+    max_frame = int(getattr(vp, "max_frame_number", 0) or 0)
+    frames_line_edit.setText(str(max_frame + 1) if max_frame > 0 else "0")
+
+
 def update_video_time_line_edit(
     main_window: "MainWindow", current_frame_number: int | None = None
 ) -> None:
@@ -120,31 +129,28 @@ def update_video_time_line_edit(
             getattr(main_window.videoSeekSlider, "value", lambda: 0)()
         )
 
-    fps = float(getattr(main_window.video_processor, "fps", 0.0) or 0.0)
-
-    # When FPS-cap recording is active, the slider and UI are in source-frame
-    # space (Approach 2). Use the source FPS for time calculations to avoid
-    # inflating displayed time when an output FPS cap is lower than the
-    # original source FPS.
     vp = getattr(main_window, "video_processor", None)
-
-    # Initialize as float to guarantee type stability for downstream math and logic
-    source_fps: float = 0.0
-    if vp is not None:
-        source_fps = float(getattr(vp, "recording_source_fps", 0.0) or 0.0)
-
+    fps = float(getattr(vp, "fps", 0.0) or 0.0)
+    source_fps = float(getattr(vp, "recording_source_fps", 0.0) or 0.0)
     if getattr(vp, "_used_ffmpeg_cap", False) and source_fps > 0.0:
         fps_to_use = source_fps
     else:
         fps_to_use = fps
 
-    total_seconds = (
-        max(0.0, float(current_frame_number) / fps_to_use) if fps_to_use > 0.0 else 0.0
-    )
+    def _format_mmss(frame_num: int) -> str:
+        if fps_to_use <= 0.0:
+            return "00:00"
+        total_seconds = max(0.0, float(frame_num) / fps_to_use)
+        minutes = int(total_seconds // 60)
+        seconds = int(total_seconds % 60)
+        return f"{minutes:02d}:{seconds:02d}"
 
-    minutes = int(total_seconds // 60)
-    seconds = int(total_seconds % 60)
-    video_time_line_edit.setText(f"{minutes:02d}:{seconds:02d}")
+    total_frames = int(getattr(vp, "max_frame_number", 0) or 0)
+    elapsed_text = _format_mmss(int(current_frame_number))
+    total_text = _format_mmss(total_frames)
+    video_time_line_edit.setText(f"{elapsed_text} / {total_text}")
+
+    update_total_frames_line_edit(main_window)
 
 
 def set_up_timeline_zoom(main_window: "MainWindow"):
@@ -232,6 +238,9 @@ def set_up_timeline_zoom(main_window: "MainWindow"):
     # We use the native Qt signal emitted whenever setMaximum() or setRange() is called on the slider.
     main_window.videoSeekSlider.rangeChanged.connect(
         lambda min_val, max_val: on_video_duration_changed(max_val)
+    )
+    main_window.videoSeekSlider.rangeChanged.connect(
+        lambda min_val, max_val: update_video_time_line_edit(main_window)
     )
 
     # Initialize bounds for the currently loaded video

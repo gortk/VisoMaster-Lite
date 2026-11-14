@@ -1,4 +1,5 @@
 import cv2
+import math
 from typing import TYPE_CHECKING
 from PySide6 import QtWidgets, QtCore, QtGui
 import app.helpers.miscellaneous as misc_helpers
@@ -65,6 +66,10 @@ class TimelineSeekSlider(QtWidgets.QSlider):
         self._move_orig_end = None
         self._move_drag_start_frame = None
         self._resize_border_px = 5
+        # Playhead grab zone (px on each side of the playhead). The playhead always
+        # wins over segment borders / segment creation so it can never be blocked.
+        self._playhead_grab_px = 7
+        self._playhead_dragging = False
         self.setMouseTracking(True)
 
     def setup(self, main_window: "MainWindow"):
@@ -281,6 +286,11 @@ class TimelineSeekSlider(QtWidgets.QSlider):
         ratio = (frame - self.minimum()) / span
         return float(groove.left() + ratio * groove.width())
 
+    def _is_on_playhead(self, x: float) -> bool:
+        if self.maximum() <= self.minimum():
+            return False
+        return abs(x - self._x_for_frame(self.value())) <= self._playhead_grab_px
+
     def _border_at_x(self, x: float):
         if self.main_window is None:
             return None
@@ -341,6 +351,21 @@ class TimelineSeekSlider(QtWidgets.QSlider):
         painter.drawText(rect, QtCore.Qt.AlignmentFlag.AlignCenter, text)
 
     def mousePressEvent(self, event):
+        # Playhead has absolute priority over segments (resize / move / create).
+        if (
+            event.button() == QtCore.Qt.MouseButton.LeftButton
+            and self.main_window is not None
+            and self.maximum() > self.minimum()
+            and self._is_on_playhead(event.position().x())
+        ):
+            self._playhead_dragging = True
+            self._hover_segment_index = None
+            self.setSliderDown(True)
+            self.setValue(self._frame_for_x(event.position().x()))
+            self.unsetCursor()
+            self.update()
+            event.accept()
+            return
         if self.main_window is not None and self.maximum() > self.minimum():
             if event.button() == QtCore.Qt.MouseButton.MiddleButton:
                 idx = self._segment_at_x(event.position().x())
@@ -370,6 +395,10 @@ class TimelineSeekSlider(QtWidgets.QSlider):
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event):
+        if self._playhead_dragging:
+            self.setValue(self._frame_for_x(event.position().x()))
+            event.accept()
+            return
         if self._segment_creation_active() and self._drag_start_frame is not None:
             self._drag_current_frame = self._frame_for_x(event.position().x())
             self.update()
@@ -404,20 +433,29 @@ class TimelineSeekSlider(QtWidgets.QSlider):
                 self.update()
             event.accept()
             return
+        over_playhead = self._is_on_playhead(event.position().x())
         if self.main_window is not None and self.maximum() > self.minimum():
-            hit = self._border_at_x(event.position().x())
+            hit = None if over_playhead else self._border_at_x(event.position().x())
             if hit is not None:
                 self.setCursor(QtCore.Qt.CursorShape.SizeHorCursor)
             else:
                 self.unsetCursor()
         if self.main_window is not None:
-            new_hover = self._segment_at_x(event.position().x())
+            new_hover = (
+                None if over_playhead else self._segment_at_x(event.position().x())
+            )
             if new_hover != self._hover_segment_index:
                 self._hover_segment_index = new_hover
                 self.update()
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event):
+        if self._playhead_dragging:
+            self._playhead_dragging = False
+            self.setSliderDown(False)
+            self.update()
+            event.accept()
+            return
         if self._move_segment_index is not None:
             self._move_segment_index = None
             self._move_orig_start = None
@@ -594,15 +632,6 @@ class TimelineSeekSlider(QtWidgets.QSlider):
                     groove_rect.bottom(),
                 )
 
-        # 5. Playhead Handle
-        if has_provisional_changes:
-            painter.setPen(self._pen_playhead_provisional)
-            painter.setBrush(self._brush_playhead_provisional)
-        else:
-            painter.setPen(self._pen_playhead_normal)
-            painter.setBrush(self._brush_playhead_normal)
-        painter.drawRect(handle_rect)
-
         # 6. Segments
         segments = getattr(self.main_window, "segments", [])
         if segments:
@@ -694,6 +723,15 @@ class TimelineSeekSlider(QtWidgets.QSlider):
                 _he_x = marker_x_for_value(int(_hs["end"]))
                 self._draw_frame_flag(painter, _hs_x, str(int(_hs["start"])), anchor_left=True)
                 self._draw_frame_flag(painter, _he_x, str(int(_hs["end"])), anchor_left=False)
+
+        # 8. Playhead Handle (drawn last so segments never cover it)
+        if has_provisional_changes:
+            painter.setPen(self._pen_playhead_provisional)
+            painter.setBrush(self._brush_playhead_provisional)
+        else:
+            painter.setPen(self._pen_playhead_normal)
+            painter.setBrush(self._brush_playhead_normal)
+        painter.drawRect(handle_rect)
 
         painter.setBrush(QtCore.Qt.BrushStyle.NoBrush)
 
@@ -1023,6 +1061,133 @@ class ThumbnailTrackWidget(QtWidgets.QWidget):
                 painter.drawRect(x_pos, 0, self.thumbnail_width - 1, self.height() - 1)
 
 
+class FrameRulerWidget(QtWidgets.QWidget):
+    """Frame ruler drawn under the thumbnails.
+
+    Tick spacing adapts to the media length and the current zoom level so labels
+    never overlap, and only the visible part of the (scrolled) timeline is painted.
+    """
+
+    LABEL_MIN_PX = 70  # minimum horizontal distance between two labelled ticks
+    MINOR_MIN_PX = 5  # minimum distance between two minor ticks
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFixedHeight(16)
+        self.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
+        self.main_window = None
+        self._slider = None
+        self._bg = QtGui.QColor("#1e1e1e")
+        self._pen_minor = QtGui.QPen(QtGui.QColor("#5f5f5f"), 1)
+        self._pen_major = QtGui.QPen(QtGui.QColor("#a8a8a8"), 1)
+        self._pen_text = QtGui.QPen(QtGui.QColor("#c8c8c8"), 1)
+        self._pen_current = QtGui.QPen(QtGui.QColor("#ffffff"), 1)
+        self._font = QtGui.QFont("Arial", 7)
+
+    def setup(self, main_window, slider):
+        self.main_window = main_window
+        self._slider = slider
+        slider.rangeChanged.connect(lambda *_: self.update())
+        slider.valueChanged.connect(lambda *_: self.update())
+        scroll_area = getattr(main_window, "timelineScrollArea", None)
+        if scroll_area:
+            scroll_area.horizontalScrollBar().valueChanged.connect(
+                lambda *_: self.update()
+            )
+
+    @staticmethod
+    def _nice_step(min_frames: float) -> int:
+        """Smallest 1/2/5 x 10^n step that is >= min_frames."""
+        if min_frames <= 1:
+            return 1
+        mag = 10 ** int(math.floor(math.log10(min_frames)))
+        for m in (1, 2, 5, 10):
+            if m * mag >= min_frames:
+                return int(m * mag)
+        return int(10 * mag)
+
+    def _steps(self, px_per_frame: float):
+        major = self._nice_step(self.LABEL_MIN_PX / max(px_per_frame, 1e-9))
+        mantissa = major // (10 ** int(math.floor(math.log10(major))))
+        divisor = 2 if mantissa == 2 else 5
+        minor = max(1, major // divisor)
+        if minor * px_per_frame < self.MINOR_MIN_PX or major % minor != 0:
+            minor = major
+        return major, minor
+
+    def _seek(self, x: float):
+        if self._slider is not None and self._slider.maximum() > self._slider.minimum():
+            self._slider.setValue(self._slider._frame_for_x(x))
+
+    def mousePressEvent(self, event):
+        if event.button() == QtCore.Qt.MouseButton.LeftButton and self._slider:
+            self._slider.setSliderDown(True)
+            self._seek(event.position().x())
+
+    def mouseMoveEvent(self, event):
+        if event.buttons() & QtCore.Qt.MouseButton.LeftButton:
+            self._seek(event.position().x())
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == QtCore.Qt.MouseButton.LeftButton and self._slider:
+            self._slider.setSliderDown(False)
+
+    def paintEvent(self, event: QtGui.QPaintEvent):
+        painter = QtGui.QPainter(self)
+        painter.fillRect(self.rect(), self._bg)
+
+        slider = self._slider
+        if slider is None or self.main_window is None:
+            return
+        vp = getattr(self.main_window, "video_processor", None)
+        if vp is not None and getattr(vp, "file_type", None) == "image":
+            return
+        lo, hi = slider.minimum(), slider.maximum()
+        if hi <= lo:
+            return
+
+        x_lo = slider._x_for_frame(lo)
+        x_hi = slider._x_for_frame(hi)
+        px_per_frame = (x_hi - x_lo) / (hi - lo)
+        if px_per_frame <= 0:
+            return
+        major, minor = self._steps(px_per_frame)
+
+        # Only paint what is visible inside the scroll area
+        vis_x0, vis_x1 = 0, self.width()
+        scroll_area = getattr(self.main_window, "timelineScrollArea", None)
+        if scroll_area is not None:
+            vis_x0 = scroll_area.horizontalScrollBar().value()
+            vis_x1 = vis_x0 + scroll_area.viewport().width()
+
+        first = max(lo, int((vis_x0 - x_lo) / px_per_frame) - minor)
+        last = min(hi, int((vis_x1 - x_lo) / px_per_frame) + minor)
+        first = (first // minor) * minor
+
+        painter.setFont(self._font)
+        h = self.height()
+        text_flags = (
+            QtCore.Qt.AlignmentFlag.AlignVCenter | QtCore.Qt.AlignmentFlag.AlignLeft
+        )
+        for f in range(first, last + 1, minor):
+            if f < lo:
+                continue
+            x = int(slider._x_for_frame(f))
+            if f % major == 0:
+                painter.setPen(self._pen_major)
+                painter.drawLine(x, h - 8, x, h)
+                painter.setPen(self._pen_text)
+                painter.drawText(x + 3, 0, 60, h - 2, text_flags, str(f))
+            else:
+                painter.setPen(self._pen_minor)
+                painter.drawLine(x, h - 4, x, h)
+
+        # Current frame indicator
+        cx = int(slider._x_for_frame(slider.value()))
+        painter.setPen(self._pen_current)
+        painter.drawLine(cx, 0, cx, h)
+
+
 class CompositeTimelineWidget(QtWidgets.QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -1031,12 +1196,15 @@ class CompositeTimelineWidget(QtWidgets.QWidget):
         self.layout.setSpacing(2)
 
         self.thumbnail_track = ThumbnailTrackWidget(self)
+        self.ruler = FrameRulerWidget(self)
         self.slider = TimelineSeekSlider(self)
 
         self.layout.addWidget(self.thumbnail_track)
+        self.layout.addWidget(self.ruler)
         self.layout.addWidget(self.slider)
 
     def setup(self, main_window):
         """Passes the main window dependency down to both children."""
         self.slider.setup(main_window)
         self.thumbnail_track.setup(main_window)
+        self.ruler.setup(main_window, self.slider)

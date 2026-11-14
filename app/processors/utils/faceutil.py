@@ -3006,7 +3006,7 @@ def apply_reinhard_color_transfer(
         t_mask = t_valid
 
     # Fallback: if target mask is empty, return original target
-    if t_mask.sum() < 100:
+    if t_mask.sum() < 500:
         return target_image.to(dtype=dtype)
 
     # Failsafe: Prevent division by zero if source is entirely black
@@ -3018,20 +3018,19 @@ def apply_reinhard_color_transfer(
     t_lab = rgb_to_lab(t_img, normalize=False)
 
     # 5. Calculate Stats INDEPENDENTLY on Valid Pixels Only
+
     s_masked = s_lab[:, s_mask]
     t_masked = t_lab[:, t_mask]
 
     s_mean = s_masked.mean(dim=1).view(3, 1, 1)
-    s_std = s_masked.std(dim=1).view(3, 1, 1)
+    s_std = torch.clamp(s_masked.std(dim=1).view(3, 1, 1), min=2.0)
 
     t_mean = t_masked.mean(dim=1).view(3, 1, 1)
-    t_std = t_masked.std(dim=1).view(3, 1, 1)
+    t_std = torch.clamp(t_masked.std(dim=1).view(3, 1, 1), min=2.0)
 
-    t_std += 1e-6  # Safety against division by zero
-
-    # 6. Apply Transfer globally to the Target
-    t_lab_trans = (t_lab - t_mean) * (s_std / t_std) + s_mean
-
+    ratio = torch.clamp(s_std / t_std, 0.5, 2.0)
+    t_lab_trans = (t_lab - t_mean) * ratio + s_mean
+    
     # 7. Clamp LAB values to biological/visual limits to prevent artifacts
     t_lab_trans[0].clamp_(0.0, 100.0)  # L (Lightness)
     t_lab_trans[1].clamp_(-127.0, 127.0)  # A (Green-Red)
@@ -3119,11 +3118,11 @@ def apply_adain_color_transfer(
         / t_calc_mask_sum
     )
 
-    src_std = torch.sqrt(src_var + eps)
-    tgt_std = torch.sqrt(tgt_var + eps)
+    src_std = torch.clamp(torch.sqrt(src_var + eps), min=2.0)
+    tgt_std = torch.clamp(torch.sqrt(tgt_var + eps), min=2.0)
+    ratio = torch.clamp(tgt_std / src_std, 0.5, 2.0)
 
-    # 5. Apply AdaIN transformation globally in LAB space
-    src_matched_lab = ((src_lab - src_mean) / src_std) * tgt_std + tgt_mean
+    src_matched_lab = ((src_lab - src_mean) * ratio) + tgt_mean
 
     # 6. Clamp LAB values to valid biological/visual ranges to prevent artifacts
     src_matched_lab[0].clamp_(0.0, 100.0)  # L (Lightness)

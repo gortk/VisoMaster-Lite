@@ -1120,6 +1120,9 @@ def handle_seek_bar_thumbnails_toggle(main_window: "MainWindow", enabled: bool):
                 main_window, "videoSeekSlider", None
             )
             h = slider.height() if slider is not None else 24
+            _ruler = getattr(composite, "ruler", None)
+            if _ruler is not None:
+                h += _ruler.height()
             composite.setFixedHeight(h)
             composite.setMaximumHeight(h)
             composite.adjustSize()

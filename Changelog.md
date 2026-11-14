@@ -4,6 +4,10 @@
 - Added new "Camera Gaze Lock" for recast mode, this saves you from having to turn on face editor
   just to fix badly detected pupils. Don't expect this to make your videos magically always gaze
   to the camera, as its more like a manual fix when required.
+- Better, more precise seek bar, with frame ruler that adapts to zoom controls.
+- Fixed the seek bar head that was conflicting with the segments so dragging it may cause segments to
+  be unwillingly interacted with.
+
 
 ### 1.0.5
 
@@ -16,10 +20,7 @@
   be a repeated theme as the issue seems rather random at the moment, so its difficult to test.
 - Enabling the "auto mouth expression" no longer freezes the app. 
 - New: no more markers. Now the user has a mouse dragging mechanic to create segments.
-
-										
- 
-
+								
 ### 1.0.4
 
 - Hopefully fixed the bug where sometimes the last_workspace.json gets corrupted and replaced with a defaults copy.

@@ -2547,7 +2547,7 @@ class PipelineProcessor:
             _ema_key = valid_t_e.tobytes()
             _face_f = original_face_512.float()
             _curr_mean = _face_f.mean(dim=(1, 2), keepdim=True)
-            _curr_std = _face_f.std(dim=(1, 2), keepdim=True) + 1e-6
+            _curr_std = torch.clamp(_face_f.std(dim=(1, 2), keepdim=True), min=2.0)
 
             with _COLOR_EMA_LOCK:
                 if self.worker.frame_number == 0 or self.worker.is_single_frame:
@@ -2566,8 +2566,9 @@ class PipelineProcessor:
                     "std": _ema_std.detach(),
                 }
 
+            _ratio = torch.clamp(_ema_std / _curr_std, 0.5, 2.0)
             original_face_for_color = (
-                ((_face_f - _curr_mean) / _curr_std * _ema_std + _ema_mean)
+                ((_face_f - _curr_mean) * _ratio + _ema_mean)
                 .clamp(0, 255)
                 .to(original_face_512.dtype)
             )
