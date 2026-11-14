@@ -2270,8 +2270,9 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
             "}"
         )
 
+        embed_btn_row.addWidget(self.inputEmbeddingsSearchBox)
+
         for btn in (
-            self.openEditorButton,
             self.openEmbeddingButton,
             self.saveEmbeddingButton,
             self.saveEmbeddingAsButton,
@@ -2287,7 +2288,9 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
             add_tab_btn.setMinimumWidth(add_tab_btn.sizeHint().width())
             embed_btn_row.addWidget(add_tab_btn)
 
-        embed_btn_row.addWidget(self.inputEmbeddingsSearchBox)
+        self.openEditorButton.setStyleSheet(btn_style)
+        embed_btn_row.addWidget(self.openEditorButton)
+        
         embed_btn_row.addStretch()
         embed_layout.addLayout(embed_btn_row)
 
