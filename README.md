@@ -21,7 +21,7 @@ Head to the repo to send yours or see whats in it.
 
 ---
 
-<img height="auto" alt="v93yy4WyKb" src="https://github.com/user-attachments/assets/f28328b7-8232-4bca-bb85-50ebc2de64b4" />
+<img height="auto" alt="ZShDavGPNZ" src="https://github.com/user-attachments/assets/ba03cbd8-6010-42fb-8643-34b91d9d9a96" />
 
 
 *All faces shown in the screenshot are synthetic demo images used for illustration.*
