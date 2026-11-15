@@ -2777,6 +2777,9 @@ class PipelineProcessor:
                 grid_size,
                 global_gamma,
                 global_contrast,
+                normalize_output=bool(
+                    parameters.get("TransferTextureModeEnableToggle", False)
+                ),
             )
 
             gradient_texture = faceutil.apply_reinhard_color_transfer(
@@ -3340,6 +3343,7 @@ class PipelineProcessor:
         grid_size: tuple[int, int],
         global_gamma: float,
         global_contrast: float,
+        normalize_output: bool = False,
     ) -> torch.Tensor:
         C, H, W = image.shape
         image = image.float() / 255.0
@@ -3397,6 +3401,17 @@ class PipelineProcessor:
             )
         else:
             weighted = inverted
+
+        if normalize_output:
+            # Mode 2 uses a much wider Gabor kernel (lambda=8, 8 orientations) whose
+            # gain is ~5-10x higher than Mode 1, so the texture map ends up far above
+            # the 0-1 range (up to ~30x). Those values then get hard-clipped in the
+            # colour transfer / uint8 conversion, producing solarized, banded colours.
+            # Rescale by the median (this matches Mode 1's brightness/contrast) and
+            # saturate, so the output always stays inside 0-255.
+            with torch.no_grad():
+                _scale = weighted.detach().flatten().median().clamp(min=1.0)
+            weighted = (weighted / _scale).clamp(0.0, 1.0)
 
         return weighted * 255
 
