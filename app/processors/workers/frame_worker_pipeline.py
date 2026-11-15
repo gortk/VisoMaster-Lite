@@ -22,7 +22,6 @@ if TYPE_CHECKING:
 _COLOR_EMA_LOCK = threading.Lock()
 _COLOR_STATS_EMA: OrderedDict[bytes, dict[str, torch.Tensor]] = OrderedDict()
 _COLOR_STATS_EMA_MAX: int = 32
-_COLOR_EMA_ALPHA: float = 0.15
 
 
 class PipelineProcessor:
@@ -2543,33 +2542,73 @@ class PipelineProcessor:
             )
 
         original_face_for_color = original_face_512
-        if parameters.get("AutoColorEnableToggle", False) and valid_t_e is not None:
+        # Optional temporal stabilisation of the colour reference (OFF by default).
+        # Only runs on video, never on stills, and every step is bounded so it can
+        # never push the reference out of range (which showed up as solarization).
+        if (
+            parameters.get("AutoColorEnableToggle", False)
+            and parameters.get("AutoColorTemporalEnableToggle", False)
+            and valid_t_e is not None
+            and not self.worker.is_single_frame
+        ):
+            _alpha = min(
+                1.0,
+                max(0.01, float(parameters.get("AutoColorTemporalAlphaDecimalSlider", 0.30))),
+            )
+            _max_gain = max(
+                1.0,
+                float(parameters.get("AutoColorTemporalMaxGainDecimalSlider", 1.15)),
+            )
+            _max_shift = max(
+                0.0,
+                float(parameters.get("AutoColorTemporalMaxShiftSlider", 12)),
+            )
+            _reset_jump = max(
+                1.0,
+                float(parameters.get("AutoColorTemporalResetJumpSlider", 30)),
+            )
+
             _ema_key = valid_t_e.tobytes()
             _face_f = original_face_512.float()
             _curr_mean = _face_f.mean(dim=(1, 2), keepdim=True)
             _curr_std = torch.clamp(_face_f.std(dim=(1, 2), keepdim=True), min=2.0)
 
             with _COLOR_EMA_LOCK:
-                if self.worker.frame_number == 0 or self.worker.is_single_frame:
+                if self.worker.frame_number == 0:
                     _COLOR_STATS_EMA.clear()
                 _prev = _COLOR_STATS_EMA.get(_ema_key)
+                # Scene cut / seek / out-of-order frame: the stored stats no longer
+                # describe this frame, so restart from the current frame instead of
+                # dragging a stale reference across the image.
+                if _prev is not None and (
+                    (_prev["mean"] - _curr_mean).abs().max().item() > _reset_jump
+                    or _prev["mean"].device != _curr_mean.device
+                ):
+                    _prev = None
                 if _prev is not None:
                     _COLOR_STATS_EMA.move_to_end(_ema_key)
-                    _ema_mean = _COLOR_EMA_ALPHA * _curr_mean + (1.0 - _COLOR_EMA_ALPHA) * _prev["mean"]
-                    _ema_std = _COLOR_EMA_ALPHA * _curr_std + (1.0 - _COLOR_EMA_ALPHA) * _prev["std"]
+                    _ema_mean = _alpha * _curr_mean + (1.0 - _alpha) * _prev["mean"]
+                    _ema_std = _alpha * _curr_std + (1.0 - _alpha) * _prev["std"]
                 else:
                     _ema_mean, _ema_std = _curr_mean, _curr_std
-                    if len(_COLOR_STATS_EMA) >= _COLOR_STATS_EMA_MAX:
+                    if (
+                        _ema_key not in _COLOR_STATS_EMA
+                        and len(_COLOR_STATS_EMA) >= _COLOR_STATS_EMA_MAX
+                    ):
                         _COLOR_STATS_EMA.popitem(last=False)
                 _COLOR_STATS_EMA[_ema_key] = {
                     "mean": _ema_mean.detach(),
                     "std": _ema_std.detach(),
                 }
 
-            _ratio = torch.clamp(_ema_std / _curr_std, 0.5, 2.0)
+            # Bounded correction: the reference may only move a few levels and
+            # change contrast a little, so highlights/shadows are never clipped.
+            _ratio = torch.clamp(_ema_std / _curr_std, 1.0 / _max_gain, _max_gain)
+            _shift = torch.clamp(_ema_mean - _curr_mean, -_max_shift, _max_shift)
             original_face_for_color = (
-                ((_face_f - _curr_mean) * _ratio + _ema_mean)
-                .clamp(0, 255)
+                ((_face_f - _curr_mean) * _ratio + _curr_mean + _shift)
+                .clamp_(0, 255)
+                .round_()
                 .to(original_face_512.dtype)
             )
 

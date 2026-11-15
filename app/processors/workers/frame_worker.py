@@ -831,6 +831,10 @@ class FrameWorker(threading.Thread):
         ).squeeze(0)
 
         # Convert back to original dtype (uint8) before passing to torchvision resizers
+        if img.dtype == torch.uint8:
+            # Bicubic warps overshoot; casting out-of-range floats to uint8 wraps
+            # around (solarization), so saturate first.
+            original_face_512 = original_face_512.clamp_(0, 255).round_()
         original_face_512 = original_face_512.to(img.dtype)
 
         assert self.t256 is not None, (
