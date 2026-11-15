@@ -1,3 +1,10 @@
+### 1.0.7
+
+- Added a "Temporal Color Smoothing" toggle under "Textures and colors" in "Face Swap" tab to configure it
+  and turn it OFF if needed. It only runs for videos, not stills. Hopefully this fixes "solarized" swaps in
+  certain bright videos.
+  
+
 ### 1.0.6
 
 - Fixed "Edit Faces" toggle not unloading its models when turning it OFF.
