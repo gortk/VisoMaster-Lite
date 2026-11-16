@@ -564,6 +564,7 @@ def create_and_add_embed_button_to_list(
     embedding_name: str,
     embedding_store: dict,
     embedding_id: str,
+    tags: list | None = None,
 ) -> None:
     inputEmbeddingsList = main_window.inputEmbeddingsList
     embed_button = widget_components.EmbeddingCardButton(
@@ -571,6 +572,7 @@ def create_and_add_embed_button_to_list(
         embedding_name=embedding_name,
         embedding_store=embedding_store,
         embedding_id=embedding_id,
+        tags=tags,
     )
     embed_button.setStyleSheet("QPushButton { padding: 2px 8px; }")
 
@@ -2040,6 +2042,14 @@ def setup_embedding_tabs(main_window: "MainWindow") -> None:
     main_window.embeddingTabs = tabs
     main_window.embedding_tab_states = []
 
+    search_box = getattr(main_window, "inputEmbeddingsSearchBox", None)
+    if search_box is not None:
+        search_box.setPlaceholderText("Search embeddings or #tags")
+        search_box.setToolTip(
+            "Searches embedding names and tags.\n"
+            "Start with # to search tags only (for example: #actor)."
+        )
+
     old_list.setParent(tabs)
     old_list.setMinimumHeight(0)
     old_list.setMaximumHeight(16777215)
@@ -2129,6 +2139,13 @@ def _activate_embedding_tab(main_window: "MainWindow", index: int, *, filter_aft
 
     if getattr(main_window, "_closing", False) or getattr(main_window, "_embedding_tabs_rebuilding", False):
         return
+
+    # Tabs restored from the embedding tabs file are only parsed the first time
+    # they are opened, so startup never loads every embedding into memory.
+    if state.get("pending"):
+        from app.ui.widgets.actions import embedding_tabs_store
+
+        embedding_tabs_store.materialize_pending_tab(main_window, state)
     filter_actions.ensure_embedding_filter_worker(main_window)
 
     search_box = getattr(main_window, "inputEmbeddingsSearchBox", None)
@@ -2245,6 +2262,7 @@ def reset_embedding_tabs(main_window):
     while tabs.count() > 1:
         tabs.removeTab(tabs.count()-1)
     main_window.embedding_tab_states[:] = main_window.embedding_tab_states[:1]
+    main_window.embedding_tab_states[0].pop("pending", None)
     tabs.blockSignals(False)
     _activate_embedding_tab(main_window, 0, filter_after=False)
     card_actions.clear_merged_embeddings(main_window)
@@ -2314,7 +2332,11 @@ def _place_restored_embedding(main_window, state, embedding_id, button):
     main_window.inputEmbeddingsList = state["list_widget"]
     main_window.merged_embeddings = state["embeddings"]
     create_and_add_embed_button_to_list(
-        main_window, button.embedding_name, button.embedding_store, embedding_id
+        main_window,
+        button.embedding_name,
+        button.embedding_store,
+        embedding_id,
+        tags=getattr(button, "tags", None),
     )
     restored = state["embeddings"][embedding_id]
     restored.kv_map = getattr(button, "kv_map", None)

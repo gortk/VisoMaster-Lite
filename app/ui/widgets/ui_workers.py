@@ -12,6 +12,7 @@ from PySide6 import QtCore as qtc
 from PySide6.QtGui import QImage
 
 from app.helpers import miscellaneous as misc_helpers
+from app.helpers import embedding_tags
 from app.ui.widgets.actions import common_actions as common_widget_actions
 from app.ui.widgets.actions import filter_actions
 from app.ui.widgets.actions import target_videos_list_actions
@@ -603,8 +604,11 @@ class FilterWorker(qtc.QThread):
         search_text = self.search_text
 
         visible_indices = []
-        for index, embedding_name in self.items_snapshot:
-            if not search_text or search_text in embedding_name.lower():
+        for item in self.items_snapshot:
+            index, embedding_name = item[0], item[1]
+            tags_lower = item[2] if len(item) > 2 else ()
+            # Matches the name or any tag; "#word" searches tags only.
+            if embedding_tags.tags_match(search_text, embedding_name, tags_lower):
                 visible_indices.append(index)
 
         self.filtered_results.emit(visible_indices, len(self.items_snapshot), self._running_generation)

@@ -18,6 +18,7 @@
 visomaster.ico
 .vs
 .vscode/
+last_workspace_embeddings.jsonl
 app/ui/core/main_window.py
 app/ui/core/media_rc.py
 data.json

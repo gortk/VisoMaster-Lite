@@ -24,6 +24,7 @@ from app.ui.widgets.actions import save_load_actions
 from app.ui.widgets.actions import list_view_actions
 import app.helpers.miscellaneous as misc_helpers
 from app.helpers.miscellaneous import get_video_rotation
+from app.helpers.embedding_tags import normalize_tags
 
 if TYPE_CHECKING:
     from app.ui.main_ui import MainWindow
@@ -1708,12 +1709,15 @@ class EmbeddingCardButton(CardButton):
         *args: Any,
         **kwargs: Any,
     ) -> None:
+        tags = kwargs.pop("tags", None)
         super().__init__(*args, **kwargs)
         self.embedding_id = embedding_id
         self.embedding_store = (
             embedding_store  # Key: embedding_swap_model, Value: embedding
         )
         self.embedding_name = embedding_name
+        # User tags, searchable from the embeddings search box
+        self.tags: List[str] = normalize_tags(tags)
 
         # Support both legacy dictionary maps and new batched list maps
         self._kv_map: Dict | None = None
@@ -1721,7 +1725,7 @@ class EmbeddingCardButton(CardButton):
 
         self.setCheckable(True)
         self.setText(embedding_name)
-        self.setToolTip(embedding_name)
+        self._refresh_tooltip()
         self.clicked.connect(self.load_embedding)
 
         # Set the context menu policy to trigger the custom context menu on right-click
@@ -1765,11 +1769,58 @@ class EmbeddingCardButton(CardButton):
         if has_legacy_map or has_new_map_list:
             # Using the UI's native accent color (#4090a3) for consistency
             self.setStyleSheet("color: #4090a3;")
-            self.setToolTip(f"{self.embedding_name} (Includes K/V Maps)")
         else:
             # Reset to default UI style
             self.setStyleSheet("")
-            self.setToolTip(self.embedding_name)
+        self._refresh_tooltip()
+
+    def _refresh_tooltip(self) -> None:
+        """Name, K/V map marker and tags in one tooltip."""
+        has_legacy_map = self._kv_map is not None and len(self._kv_map) > 0
+        has_new_map_list = self._kv_map_list is not None and len(self._kv_map_list) > 0
+        tooltip = self.embedding_name
+        if has_legacy_map or has_new_map_list:
+            tooltip += " (Includes K/V Maps)"
+        if self.tags:
+            tooltip += "\nTags: " + ", ".join(self.tags)
+        self.setToolTip(tooltip)
+
+    def set_tags(self, tags) -> None:
+        """Replace the tags of this embedding (input is cleaned/deduplicated)."""
+        self.tags = normalize_tags(tags)
+        self._refresh_tooltip()
+
+    def _collect_known_tags(self, limit: int = 20) -> List[str]:
+        """Tags already used in the loaded tabs, most used first."""
+        counts: Dict[str, int] = {}
+        spelling: Dict[str, str] = {}
+        for button in list_view_actions.get_all_merged_embeddings(
+            self.main_window
+        ).values():
+            for tag in getattr(button, "tags", None) or []:
+                key = tag.lower()
+                counts[key] = counts.get(key, 0) + 1
+                spelling.setdefault(key, tag)
+        ordered = sorted(counts, key=lambda k: (-counts[k], k))
+        return [spelling[k] for k in ordered[:limit]]
+
+    def edit_tags(self) -> None:
+        """Open the small Tag pop-up to add, change or remove this embedding's tags."""
+        from app.ui.widgets.actions import filter_actions
+
+        dialog = EmbeddingTagsDialog(
+            self.embedding_name,
+            self.tags,
+            self._collect_known_tags(),
+            parent=self.main_window,
+        )
+        if dialog.exec() != QtWidgets.QDialog.DialogCode.Accepted:
+            return
+        self.set_tags(dialog.get_tags())
+        # Keep an active search consistent with the edited tags
+        search_box = getattr(self.main_window, "inputEmbeddingsSearchBox", None)
+        if search_box is not None and search_box.text():
+            filter_actions.filter_merged_embeddings(self.main_window)
 
     def set_embedding(self, embedding_swap_model: str, embedding: np.ndarray) -> None:
         self.embedding_store[embedding_swap_model] = embedding
@@ -1846,6 +1897,14 @@ class EmbeddingCardButton(CardButton):
         from app.ui.widgets.actions import list_view_actions
 
         self.popMenu = QtWidgets.QMenu(self)
+        self.tag_action = QtGui.QAction("Tag", self)
+        # Deferred so the menu is fully closed before the pop-up opens
+        self.tag_action.triggered.connect(
+            lambda _checked=False: QtCore.QTimer.singleShot(0, self.edit_tags)
+        )
+        self.popMenu.addAction(self.tag_action)
+        self.popMenu.addSeparator()
+
         self.remove_action = QtGui.QAction("Remove Embedding", self)
         self.remove_action.triggered.connect(self.remove_embedding_from_list)
         self.popMenu.addAction(self.remove_action)
@@ -1869,6 +1928,7 @@ class EmbeddingCardButton(CardButton):
             self._exec_context_menu(point)
         finally:
             self._release_context_menu(
+                "tag_action",
                 "remove_action",
                 "clear_all_embeddings_action",
             )
@@ -1892,6 +1952,61 @@ class EmbeddingCardButton(CardButton):
         _invalidate_kv_merge_cache(main_window)
         common_widget_actions.refresh_frame(self.main_window)
         self.deleteLater()
+
+
+class EmbeddingTagsDialog(QtWidgets.QDialog):
+    """Small pop-up with one text box to add, edit or delete an embedding's tags."""
+
+    def __init__(
+        self,
+        embedding_name: str,
+        tags: List[str],
+        known_tags: List[str] | None = None,
+        parent: QtWidgets.QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Tag")
+        self.setModal(True)
+        self.setMinimumWidth(360)
+
+        layout = QtWidgets.QVBoxLayout(self)
+
+        title_label = QtWidgets.QLabel(f"Tags for: {embedding_name}")
+        title_label.setWordWrap(True)
+        layout.addWidget(title_label)
+
+        self.tags_edit = QtWidgets.QLineEdit(", ".join(tags or []))
+        self.tags_edit.setPlaceholderText("e.g. blonde, actor, front-facing")
+        self.tags_edit.setClearButtonEnabled(True)
+        layout.addWidget(self.tags_edit)
+
+        hint_label = QtWidgets.QLabel(
+            "Separate tags with commas. Edit or delete tags in the box, "
+            "or clear it to remove all tags."
+        )
+        hint_label.setWordWrap(True)
+        hint_label.setStyleSheet("color: gray;")
+        layout.addWidget(hint_label)
+
+        if known_tags:
+            known_label = QtWidgets.QLabel("In use: " + ", ".join(known_tags))
+            known_label.setWordWrap(True)
+            known_label.setStyleSheet("color: gray;")
+            layout.addWidget(known_label)
+
+        button_box = QtWidgets.QDialogButtonBox(
+            QtWidgets.QDialogButtonBox.StandardButton.Ok
+            | QtWidgets.QDialogButtonBox.StandardButton.Cancel
+        )
+        button_box.accepted.connect(self.accept)
+        button_box.rejected.connect(self.reject)
+        layout.addWidget(button_box)
+
+        self.tags_edit.setFocus()
+        self.tags_edit.selectAll()
+
+    def get_tags(self) -> List[str]:
+        return normalize_tags(self.tags_edit.text())
 
 
 class CreateEmbeddingDialog(QtWidgets.QDialog):

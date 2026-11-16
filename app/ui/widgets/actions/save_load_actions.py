@@ -23,6 +23,7 @@ from app.ui.widgets.actions import video_control_actions
 from app.ui.widgets.actions import control_actions
 from app.ui.widgets.actions import layout_actions
 from app.ui.widgets.actions import filter_actions
+from app.ui.widgets.actions import embedding_tabs_store
 from app.ui.widgets import ui_workers
 from app.helpers.typing_helper import ParametersTypes, MarkerTypes
 import app.helpers.miscellaneous as misc_helpers
@@ -377,6 +378,7 @@ def open_embeddings_from_file(main_window: "MainWindow"):
                         embed_data["name"],
                         embedding_store,
                         embedding_id=embedding_id,
+                        tags=embed_data.get("tags"),
                     )
 
                     if embedding_id in main_window.merged_embeddings:
@@ -454,6 +456,7 @@ def load_embeddings_into_current_tab(
                     embed_data["name"],
                     embedding_store,
                     embedding_id=embedding_id,
+                    tags=embed_data.get("tags"),
                 )
 
                 if embedding_id in main_window.merged_embeddings:
@@ -555,15 +558,16 @@ def save_embeddings_to_file(main_window: "MainWindow", save_as=False):
                     f"[ERROR] Error saving hashed K/V map for embedding {embedding_id}: {e}"
                 )
 
-        embeddings_list.append(
-            {
-                "name": embed_button.embedding_name,
-                "embedding_store": {
-                    k: v.tolist() for k, v in embed_button.embedding_store.items()
-                },
-                "kv_map": kv_map_path,
-            }
-        )
+        embedding_entry = {
+            "name": embed_button.embedding_name,
+            "embedding_store": {
+                k: v.tolist() for k, v in embed_button.embedding_store.items()
+            },
+            "kv_map": kv_map_path,
+        }
+        if getattr(embed_button, "tags", None):
+            embedding_entry["tags"] = list(embed_button.tags)
+        embeddings_list.append(embedding_entry)
 
     if embedding_filename:
         with open(embedding_filename, "w", encoding="utf-8") as embed_file:
@@ -935,7 +939,11 @@ def _workspace_after_inputs(main_window, data, data_filename):
             "embedding_name", embedding_data.get("name", "Unknown")
         )
         list_view_actions.create_and_add_embed_button_to_list(
-            main_window, embedding_name, embedding_store_loaded, embedding_id=embedding_id
+            main_window,
+            embedding_name,
+            embedding_store_loaded,
+            embedding_id=embedding_id,
+            tags=embedding_data.get("tags"),
         )
         embed_button = main_window.merged_embeddings.get(embedding_id)
         if embed_button is None:
@@ -961,16 +969,35 @@ def _workspace_after_inputs(main_window, data, data_filename):
         except Exception as e:
             print(f"[ERROR] Error loading K/V map for embedding from {kv_map_path}: {e}")
 
-    for embedding_id, embedding_data in data.get("embeddings_data", {}).items():
-        steps.append(partial(_load_embedding, embedding_id, embedding_data))
-
-    steps.append(
-        partial(
-            list_view_actions.restore_embedding_tabs_state,
-            main_window,
-            data.get("embedding_tabs_state", {}),
-        )
+    saved_tabs_state = data.get("embedding_tabs_state")
+    external_tabs_file = (
+        saved_tabs_state.get("external_file")
+        if isinstance(saved_tabs_state, dict)
+        else None
     )
+    if external_tabs_file:
+        # New format: the workspace only points at the separate embedding tabs
+        # file; the embeddings are loaded lazily, one tab at a time.
+        steps.append(
+            partial(
+                _restore_embedding_tabs_from_file,
+                main_window,
+                data_filename,
+                saved_tabs_state,
+            )
+        )
+    else:
+        # Older workspaces and manually saved workspaces keep embeddings inline.
+        for embedding_id, embedding_data in data.get("embeddings_data", {}).items():
+            steps.append(partial(_load_embedding, embedding_id, embedding_data))
+
+        steps.append(
+            partial(
+                list_view_actions.restore_embedding_tabs_state,
+                main_window,
+                data.get("embedding_tabs_state", {}),
+            )
+        )
 
     def _restore_markers_controls():
         video_control_actions.remove_all_markers(main_window)
@@ -1233,6 +1260,54 @@ def _workspace_after_inputs(main_window, data, data_filename):
     _run_workspace_steps(main_window, steps, 0)
 
 
+def _restore_embedding_tabs_from_file(main_window, data_filename, tabs_state):
+    # Only a plain file name is accepted: the file always sits next to the workspace.
+    file_name = Path(str(tabs_state.get("external_file"))).name
+    embedding_tabs_store.restore_tabs_from_file(
+        main_window,
+        Path(str(data_filename)).parent / file_name,
+        data_filename,
+        active_hint=tabs_state.get("active_index", 0),
+    )
+
+
+def _add_pending_tabs_inline(
+    main_window, tabs_state: dict, embeddings_data: dict, parent_path: str
+) -> None:
+    """Inline workspaces must contain tabs that were never opened this session too."""
+    states = getattr(main_window, "embedding_tab_states", None) or []
+    saved_tabs = tabs_state.get("tabs", [])
+    for i, state in enumerate(states):
+        pending = state.get("pending")
+        if not pending or i >= len(saved_tabs):
+            continue
+        try:
+            entries = embedding_tabs_store.read_pending_entries(pending)
+        except Exception as e:
+            print(f"[ERROR] Could not read unopened embedding tab {i + 1}: {e}")
+            continue
+        ids = []
+        for entry in entries:
+            embedding_id = str(entry.get("id") or uuid.uuid1().int)
+            if embedding_id in embeddings_data:
+                embedding_id = str(uuid.uuid1().int)
+            kv_map_path = entry.get("kv_map")
+            inline_entry = {
+                "embedding_name": entry.get("name", entry.get("embedding_name", "Unknown")),
+                "embedding_store": entry.get("embedding_store") or {},
+                "kv_map": kv_map_path,
+            }
+            if entry.get("tags"):
+                inline_entry["tags"] = list(entry["tags"])
+            embeddings_data[embedding_id] = inline_entry
+            ids.append(embedding_id)
+            if kv_map_path:
+                _update_registry(
+                    main_window, Path(kv_map_path).name, parent_path, "reference_kv_data"
+                )
+        saved_tabs[i]["embedding_ids"] = ids
+
+
 def _run_workspace_steps(main_window, steps, index, errors=None):
     if errors is None:
         errors = []
@@ -1276,6 +1351,9 @@ def save_current_workspace(
         data_filename = dialog_filename
 
     resolved_parent_path = str(data_filename)
+    # last_workspace.json keeps embeddings out of the file (privacy / size): they
+    # are written to a separate file, see embedding_tabs_store.
+    use_tabs_file = str(data_filename).endswith("last_workspace.json")
 
     embeddings_data = {}
     input_faces_data = {}
@@ -1362,7 +1440,12 @@ def save_current_workspace(
             "kv_map": kv_map_path,
         }
 
-    for embedding_id, embedding_button in list_view_actions.get_all_merged_embeddings(main_window).items():
+    inline_embedding_buttons = (
+        {}
+        if use_tabs_file
+        else list_view_actions.get_all_merged_embeddings(main_window)
+    )
+    for embedding_id, embedding_button in inline_embedding_buttons.items():
         kv_map_path = None
         kv_payload_to_save = getattr(embedding_button, "kv_map_list", None) or getattr(
             embedding_button, "kv_map", None
@@ -1394,6 +1477,8 @@ def save_current_workspace(
             },
             "kv_map": kv_map_path,
         }
+        if getattr(embedding_button, "tags", None):
+            embeddings_data[embedding_id]["tags"] = list(embedding_button.tags)
 
     markers_to_save = sanitize_markers_dictionary(
         main_window,
@@ -1410,6 +1495,25 @@ def save_current_workspace(
     for i in range(main_window.tabWidget.count()):
         tab_state["tab_order"].append(
             {"text": main_window.tabWidget.tabText(i), "original_index": i}
+        )
+
+    if use_tabs_file:
+        embedding_tabs_widget = getattr(main_window, "embeddingTabs", None)
+        embedding_tabs_state_to_save = {
+            "external_file": embedding_tabs_store.sidecar_path_for(data_filename).name,
+            "tab_count": len(getattr(main_window, "embedding_tab_states", None) or []),
+            "active_index": (
+                max(0, embedding_tabs_widget.currentIndex())
+                if embedding_tabs_widget is not None
+                else 0
+            ),
+        }
+    else:
+        embedding_tabs_state_to_save = list_view_actions.get_embedding_tabs_state(
+            main_window
+        )
+        _add_pending_tabs_inline(
+            main_window, embedding_tabs_state_to_save, embeddings_data, resolved_parent_path
         )
 
     current_params_to_save = {}
@@ -1463,10 +1567,12 @@ def save_current_workspace(
         ],
         "last_target_media_folder_path": main_window.last_target_media_folder_path,
         "last_input_media_folder_path": main_window.last_input_media_folder_path,
-        "loaded_embedding_filename": main_window.loaded_embedding_filename,
-        "embedding_tabs_state": list_view_actions.get_embedding_tabs_state(
-            main_window
+        # The path of an embeddings file can reveal names, so it is not written to
+        # last_workspace.json; the separate embedding tabs file keeps it.
+        "loaded_embedding_filename": (
+            "" if use_tabs_file else main_window.loaded_embedding_filename
         ),
+        "embedding_tabs_state": embedding_tabs_state_to_save,
         "current_widget_parameters": current_params_to_save,
         "tab_state": tab_state,
         "window_state_data": window_state_data,
@@ -1482,6 +1588,10 @@ def save_current_workspace(
         if _is_last_ws and getattr(main_window, "_workspace_load_failed", False):
             print("[WARN] Skipping last_workspace save: previous load failed")
             return
+
+        if use_tabs_file:
+            # Failure is logged inside; the workspace itself is still saved.
+            embedding_tabs_store.write_embedding_tabs_file(main_window, data_filename)
 
         tmp_path = f"{data_filename}.{os.getpid()}.{uuid.uuid4().hex[:8]}.tmp"
         bak_path = f"{data_filename}.bak"

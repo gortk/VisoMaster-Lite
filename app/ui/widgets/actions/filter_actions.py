@@ -82,7 +82,10 @@ def filter_merged_embeddings(main_window: "MainWindow", *args):
         item = main_window.inputEmbeddingsList.item(i)
         item_widget = main_window.inputEmbeddingsList.itemWidget(item)
         if item_widget is not None:
-            items_snapshot.append((i, item_widget.embedding_name))
+            tags_lower = tuple(
+                tag.lower() for tag in (getattr(item_widget, "tags", None) or [])
+            )
+            items_snapshot.append((i, item_widget.embedding_name, tags_lower))
 
     worker.search_text = search_text
     worker.items_snapshot = items_snapshot
