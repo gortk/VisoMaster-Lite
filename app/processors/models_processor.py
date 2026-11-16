@@ -2,6 +2,7 @@ import threading
 import os
 import subprocess as sp
 import gc
+import itertools
 import json
 import re
 import sys
@@ -168,6 +169,17 @@ class ModelsProcessor(QtCore.QObject):
     # Signal to request the GUI thread to hide the build dialog
     hide_build_dialog = QtCore.Signal()
 
+    # TensorRT engine-build popup (see app/ui/widgets/trt_build_dialog.py).
+    # Every build is a "job" so overlapping builds cannot close each other's popup.
+    # Arguments: (job_id, model_name, max_attempts, show_delay_ms)
+    trt_build_started = QtCore.Signal(str, str, int, int)
+    # Arguments: (job_id, attempt_number)
+    trt_build_attempt = QtCore.Signal(str, int)
+    # Arguments: (job_id, status_line)
+    trt_build_status = QtCore.Signal(str, str)
+    # Arguments: (job_id,) - always emitted, success or not
+    trt_build_finished = QtCore.Signal(str)
+
     def __init__(self, main_window: "MainWindow", device: str = "") -> None:
         """
         Initialises the ModelsProcessor.
@@ -265,6 +277,7 @@ class ModelsProcessor(QtCore.QObject):
         # A set to keep track of models that have been loaded but
         # have not had their engine built (lazy build).
         self.models_pending_build: set = set()
+        self._build_job_seq = itertools.count(1)
 
         self._models_loading: set = set()
         self.providers: list = self._default_providers()
@@ -325,6 +338,9 @@ class ModelsProcessor(QtCore.QObject):
     def binding_device_id(self) -> int:
         return self.gpu_id if self.device_type != "cpu" else 0
 
+    def _make_build_job_id(self, kind: str, name: str) -> str:
+        return f"{kind}:{name}:{next(self._build_job_seq)}"
+
     def _run_build_probe(
         self,
         onnx_path: str,
@@ -333,6 +349,7 @@ class ModelsProcessor(QtCore.QObject):
         session_options_dict: Dict[str, Any],
         model_name: str,
         timeout_seconds: int = 900,
+        job_id: Optional[str] = None,
     ) -> int:
         config = {
             "model_path": onnx_path,
@@ -369,8 +386,17 @@ class ModelsProcessor(QtCore.QObject):
 
             def _pump_output() -> None:
                 assert probe_process.stdout is not None
+                last_status_emit = 0.0
                 for line in probe_process.stdout:
-                    print(line.rstrip("\r\n"), flush=True)
+                    text = line.rstrip("\r\n")
+                    print(text, flush=True)
+                    # Forward the latest build log line to the popup, throttled so
+                    # a chatty builder cannot flood the GUI event queue.
+                    if job_id and text.strip():
+                        now = time.monotonic()
+                        if now - last_status_emit >= 0.3:
+                            last_status_emit = now
+                            self.trt_build_status.emit(job_id, text.strip())
 
             reader = threading.Thread(target=_pump_output, daemon=True)
             reader.start()
@@ -392,8 +418,9 @@ class ModelsProcessor(QtCore.QObject):
                     self._clean_tensorrt_cache(onnx_path, trt_options)
                     raise RuntimeError("TensorRT Engine build timed out.")
                 if on_gui_thread:
+                    # Keep the build popup painting/ticking while we wait.
                     QtCore.QCoreApplication.processEvents()
-                time.sleep(0.1)
+                time.sleep(0.05)
 
             reader.join(timeout=5)
             return (
@@ -759,15 +786,28 @@ class ModelsProcessor(QtCore.QObject):
                                 f"[INFO] TensorRT load detected for {canonical_name}. Running isolated probe..."
                             )
                             build_was_triggered = True
+                            max_retries = 3
+                            build_job_id = self._make_build_job_id(
+                                "probe", canonical_name
+                            )
                             try:
+                                # Popup is shown only now: a real engine build is
+                                # about to run. The short delay keeps it from
+                                # flashing if the "cache missing" check was a
+                                # false alarm and the load is over in a moment.
+                                self.trt_build_started.emit(
+                                    build_job_id, canonical_name, max_retries, 1200
+                                )
                                 sess_options_dict = {"intra_op_num_threads": 1}
                                 probe_successful = False
                                 last_exit_code = None
-                                max_retries = 3
 
                                 for attempt in range(max_retries):
                                     print(
                                         f"[INFO] Probe attempt {attempt + 1} of {max_retries} for {canonical_name}..."
+                                    )
+                                    self.trt_build_attempt.emit(
+                                        build_job_id, attempt + 1
                                     )
                                     exitcode = self._run_build_probe(
                                         onnx_path,
@@ -776,6 +816,7 @@ class ModelsProcessor(QtCore.QObject):
                                         sess_options_dict,
                                         canonical_name,
                                         timeout_seconds=900,
+                                        job_id=build_job_id,
                                     )
                                     last_exit_code = exitcode
 
@@ -789,6 +830,11 @@ class ModelsProcessor(QtCore.QObject):
                                         print(
                                             f"[WARN] Probe attempt {attempt + 1} failed with exit code {exitcode}."
                                         )
+                                        if attempt < max_retries - 1:
+                                            self.trt_build_status.emit(
+                                                build_job_id,
+                                                f"Attempt {attempt + 1} failed (exit code {exitcode}), retrying...",
+                                            )
                                         print(
                                             f"[INFO] Cleaning up potentially corrupted TensorRT cache for {canonical_name}..."
                                         )
@@ -814,6 +860,9 @@ class ModelsProcessor(QtCore.QObject):
                                 self.models[canonical_name] = None
                                 models_loading.discard(canonical_name)
                                 return None
+                            finally:
+                                # Close the popup on success, failure or timeout.
+                                self.trt_build_finished.emit(build_job_id)
 
                 try:
                     if self.models.get(canonical_name):
@@ -941,6 +990,7 @@ class ModelsProcessor(QtCore.QObject):
                 return self.dfm_models[dfm_model]
 
             self.main_window.model_loading_signal.emit()
+            dfm_build_job_id: Optional[str] = None
             try:
                 max_models_to_keep = self.main_window.control["MaxDFMModelsSlider"]
                 total_loaded_models = len(self.dfm_models)
@@ -996,6 +1046,20 @@ class ModelsProcessor(QtCore.QObject):
 
                     dfm_providers[0] = ("TensorrtExecutionProvider", trt_options)
 
+                    # No engine file in this model's dedicated cache dir means the
+                    # session creation below really has to generate one. Plain
+                    # loads (engine already cached) never raise the popup.
+                    try:
+                        has_engine = any(
+                            name.lower().endswith(".engine")
+                            for name in os.listdir(dedicated_cache_dir)
+                        )
+                    except OSError:
+                        has_engine = True  # unknown: do not risk a false popup
+                    if not has_engine:
+                        dfm_build_job_id = self._make_build_job_id("dfm", safe_name)
+                        self.trt_build_started.emit(dfm_build_job_id, dfm_model, 1, 0)
+
                 self.dfm_models[dfm_model] = DFMModel(
                     self.main_window.dfm_model_manager.get_models_data()[dfm_model],
                     dfm_providers,
@@ -1007,6 +1071,8 @@ class ModelsProcessor(QtCore.QObject):
                 traceback.print_exc()
                 self.dfm_models[dfm_model] = None
             finally:
+                if dfm_build_job_id is not None:
+                    self.trt_build_finished.emit(dfm_build_job_id)
                 self.main_window.model_loaded_signal.emit()
 
             return self.dfm_models.get(dfm_model)

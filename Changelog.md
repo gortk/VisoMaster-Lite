@@ -1,3 +1,7 @@
+### 1.0.8
+
+- Added a popup window when generating tensorrt engines (the tensor cache)
+
 ### 1.0.7
 
 - Added a "Temporal Color Smoothing" toggle under "Textures and colors" in "Face Swap" tab to configure it

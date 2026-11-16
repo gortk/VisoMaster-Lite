@@ -1,3 +1,4 @@
+import re
 from typing import Dict, Optional
 from pathlib import Path
 from functools import partial
@@ -26,6 +27,7 @@ from app.processors.models_processor import ModelsProcessor
 from app.processors.utils import platform_support
 from app.processors.workers.function_worker import FunctionWorker
 from app.ui.widgets import widget_components
+from app.ui.widgets.trt_build_dialog import TrtBuildDialog
 from app.ui.widgets.event_filters import (
     GraphicsViewEventFilter,
     VideoSeekSliderEventFilter,
@@ -111,6 +113,11 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
         # Connect the signals from the worker thread to our new slots
         self.models_processor.show_build_dialog.connect(self.show_build_dialog)
         self.models_processor.hide_build_dialog.connect(self.hide_build_dialog)
+
+        # TensorRT engine-build popup: lives in the GUI thread, driven by signals.
+        # (Dialog widget itself is created in initialize_widgets.)
+        self._lazy_build_job_ids: list = []
+        self._lazy_build_job_seq = 0
 
         self.target_videos: Dict[
             str, widget_components.TargetMediaCardButton
@@ -692,18 +699,14 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
                 "After", initial_mode_after
             )
 
-        # Initialize the dedicated progress dialog for TensorRT builds.
-        # This object is created here, in the main GUI thread.
-        self.build_progress_dialog = QtWidgets.QProgressDialog(self)
-        flags = self.build_progress_dialog.windowFlags()
-        flags &= ~QtCore.Qt.WindowCloseButtonHint
-        self.build_progress_dialog.setWindowFlags(flags)
-        self.build_progress_dialog.setCancelButton(None)
-        self.build_progress_dialog.setWindowModality(
-            QtCore.Qt.WindowModality.WindowModal
-        )
-        self.build_progress_dialog.setRange(0, 0)  # Indeterminate (busy) mode
-        self.build_progress_dialog.close()  # Ensure it's hidden on startup
+        # Initialize the dedicated popup for TensorRT engine builds.
+        # Created here in the GUI thread; stays hidden until a build starts.
+        self.trt_build_dialog = TrtBuildDialog(self)
+        mp = self.models_processor
+        mp.trt_build_started.connect(self.trt_build_dialog.begin)
+        mp.trt_build_attempt.connect(self.trt_build_dialog.set_attempt)
+        mp.trt_build_status.connect(self.trt_build_dialog.set_status)
+        mp.trt_build_finished.connect(self.trt_build_dialog.end)
 
         self.scan_progress_dialog = QtWidgets.QProgressDialog(self)
         scan_flags = self.scan_progress_dialog.windowFlags()
@@ -956,24 +959,27 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
     @QtCore.Slot(str, str)
     def show_build_dialog(self, title, text):
         """
-        Slot to show or update the TensorRT build progress dialog.
-        This function is guaranteed to run in the main GUI thread.
+        First-run ("lazy") TensorRT build started. The processors emit this
+        right before the first inference of a model whose engine is still
+        missing and emit hide_build_dialog() when that inference is done.
+        Runs in the GUI thread; feeds the same popup as the probe builds.
         """
-        if self.build_progress_dialog:
-            self.build_progress_dialog.setWindowTitle(title)
-            self.build_progress_dialog.setLabelText(text)
-            self.build_progress_dialog.show()
-            # Force the GUI to update immediately
-            QtCore.QCoreApplication.processEvents()
+        match = re.search(r"for:\s*\n\s*(.+?)\s*(?:\n|$)", text or "")
+        model_name = match.group(1) if match else (title or "TensorRT model")
+        self._lazy_build_job_seq += 1
+        job_id = f"lazy:{model_name}:{self._lazy_build_job_seq}"
+        self._lazy_build_job_ids.append(job_id)
+        # Short delay: a first run that finishes right away never shows a popup.
+        self.trt_build_dialog.begin(job_id, model_name, 1, 1200)
 
     @QtCore.Slot()
     def hide_build_dialog(self):
         """
-        Slot to hide the TensorRT build progress dialog.
-        This function is guaranteed to run in the main GUI thread.
+        First-run ("lazy") TensorRT build finished (also called on failure).
+        Runs in the GUI thread. Show/hide are strictly paired by the callers.
         """
-        if self.build_progress_dialog:
-            self.build_progress_dialog.close()
+        if self._lazy_build_job_ids:
+            self.trt_build_dialog.end(self._lazy_build_job_ids.pop(0))
 
     def __init__(self, gpu_id=0):
         super(MainWindow, self).__init__()
