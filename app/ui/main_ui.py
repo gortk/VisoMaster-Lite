@@ -1082,10 +1082,10 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
         self.setWindowTitle(self.app_display_metadata.window_title)
 
     def show(self):
-        """Defer the real show until the workspace has finished loading."""
         if not getattr(self, "_workspace_load_done", True):
             self._deferred_show = True
             self._show_loading_splash()
+            QtCore.QTimer.singleShot(500, self._on_workspace_load_finished)
             return
         super().show()
 
@@ -1115,7 +1115,6 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
         painter.end()
 
         splash = QtWidgets.QSplashScreen(pixmap)
-        splash.setWindowFlag(QtCore.Qt.WindowType.WindowStaysOnTopHint, True)
         splash.setWindowFlag(QtCore.Qt.WindowType.FramelessWindowHint, True)
         screen = QtWidgets.QApplication.primaryScreen().availableGeometry()
         splash.move(screen.center() - splash.rect().center())
@@ -1126,7 +1125,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
         self._splash_timeout = QtCore.QTimer(self)
         self._splash_timeout.setSingleShot(True)
         self._splash_timeout.setInterval(30000)
-        self._splash_timeout.timeout.connect(self._force_finish_splash)
+        self._splash_timeout.timeout.connect(self._on_workspace_load_finished)
         self._splash_timeout.start()
 
     def _hide_loading_splash(self) -> None:
@@ -1136,35 +1135,36 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
             except RuntimeError:
                 pass
             self._splash_timeout = None
-        if self._loading_splash is not None:
-            try:
-                self._loading_splash.close()
-            except RuntimeError:
-                pass
-            self._loading_splash = None
-
-    def _force_finish_splash(self) -> None:
-        if self._workspace_load_done:
+        splash = self._loading_splash
+        self._loading_splash = None
+        if splash is None:
             return
-        print(
-            "[WARN] Workspace load did not signal completion within 30s; "
-            "showing the window anyway."
-        )
-        self._on_workspace_load_finished()
+        try:
+            splash.finish(self)
+        except RuntimeError:
+            pass
+        try:
+            splash.hide()
+            splash.setVisible(False)
+            splash.close()
+        except RuntimeError:
+            pass
+        splash.deleteLater()
 
     def _on_workspace_load_finished(self) -> None:
-        if self._workspace_load_done:
-            return
         self._workspace_load_done = True
-        self._hide_loading_splash()
-        if self._deferred_show:
+        if not getattr(self, "_window_shown", False):
+            self._window_shown = True
             self._deferred_show = False
             super().show()
             self.raise_()
             self.activateWindow()
-        QtCore.QTimer.singleShot(
-            150, lambda: layout_actions.fit_image_to_view_onchange(self)
-        )
+        self._hide_loading_splash()
+        if not getattr(self, "_workspace_fit_scheduled", False):
+            self._workspace_fit_scheduled = True
+            QtCore.QTimer.singleShot(
+                150, lambda: layout_actions.fit_image_to_view_onchange(self)
+            )
 
 
     def keyPressEvent(self, event):
@@ -1349,12 +1349,28 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
         if workspace_load_triggered:
             # Queue the auto-watch restore after the async chain signals done.
             # The chain closes _workspace_load_done on the last step.
-            def _wait_and_restore():
+            def _wait_and_restore(seen_in_progress=False, polls=0):
                 if getattr(self, "_workspace_load_done", True):
+                    self._on_workspace_load_finished()
                     _restore_auto_watch_after_load()
-                else:
-                    QtCore.QTimer.singleShot(100, _wait_and_restore)
-
+                    return
+                in_progress = bool(
+                    getattr(self, "_workspace_load_in_progress", False)
+                )
+                if seen_in_progress and not in_progress:
+                    self._on_workspace_load_finished()
+                    _restore_auto_watch_after_load()
+                    return
+                if polls >= 20 and not in_progress and not seen_in_progress:
+                    self._on_workspace_load_finished()
+                    _restore_auto_watch_after_load()
+                    return
+                QtCore.QTimer.singleShot(
+                    100,
+                    lambda: _wait_and_restore(
+                        seen_in_progress or in_progress, polls + 1
+                    ),
+                )
             QtCore.QTimer.singleShot(100, _wait_and_restore)
         else:
             _restore_auto_watch_after_load()
