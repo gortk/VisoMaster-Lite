@@ -309,7 +309,7 @@ SETTINGS_LAYOUT_DATA: Any = {
         },
         "ClusterOutputBySourceToggle": {
             "level": 1,
-            "label": "Cluster Output by Source Name",
+            "label": "Subfolder using embedding name",
             "default": False,
             "help": "Save processed output into a subfolder named after the selected merged embedding.",
         },

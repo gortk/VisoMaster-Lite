@@ -318,5 +318,10 @@ def setup(main_window):
 
     enable_toggle.toggled.connect(ext.set_enabled)
 
-    main_window.tabWidget.addTab(tab, "Mask Painter")
+    # Tabs now live in the full-width row under the menu bar.
+    add_tab = getattr(main_window, "add_parameter_tab", None)
+    if add_tab is not None:
+        add_tab(tab, "Mask Painter")
+    else:  # older builds without the top tab row
+        main_window.tabWidget.addTab(tab, "Mask Painter")
     return ext

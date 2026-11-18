@@ -121,8 +121,15 @@ def add_widgets_to_tab_layout(
 
             # --- separator branch (must be first) ---
             if widget_data.get("type") == "separator":
-                add_separator_to_category(
+                separator_container = add_separator_to_category(
                     category_layout, cast(str, widget_data.get("label", ""))
+                )
+                # Remembered so a separator with "parentToggle" can be shown/hidden
+                # together with the widgets of its section.
+                if not hasattr(main_window, "parameter_separators"):
+                    main_window.parameter_separators = {}
+                main_window.parameter_separators[(id(widgets), widget_name)] = (
+                    separator_container
                 )
                 continue
 

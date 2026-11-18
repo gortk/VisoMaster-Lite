@@ -435,6 +435,21 @@ def show_hide_related_widgets(
 
         # --- CASE 2: PARENT IS A TOGGLE BUTTON ---
         elif "Toggle" in parent_widget_name:
+            # Section separators/titles that depend on this toggle (they are plain
+            # containers, not parameter widgets).
+            separators = getattr(main_window, "parameter_separators", {})
+            for widget_name, layout_info in group_layout_data.items():
+                if (
+                    layout_info.get("type") == "separator"
+                    and layout_info.get("parentToggle") == parent_widget_name
+                ):
+                    container = separators.get((id(group_layout_data), widget_name))
+                    if container is not None:
+                        container.setVisible(
+                            parent_widget.isChecked()
+                            == layout_info.get("requiredToggleValue", True)
+                        )
+
             for widget_name in group_layout_data.keys():
                 if widget_name not in main_window.parameter_widgets:
                     continue

@@ -590,6 +590,70 @@ class TargetMediaCardButton(CardButton):
                 directory = os.path.dirname(os.path.abspath(self.media_path))
                 subprocess.run(["xdg-open", directory])
 
+    def open_output_in_folder(self):
+        """Open the output folder that this target's results are written to.
+
+        The folder comes from the same logic the exporter uses: the configured
+        output folder, and - when "Subfolder using embedding name" is on - the
+        sub-folder named after the currently selected embedding.
+        """
+        main_window = self.main_window
+        try:
+            folder = video_control_actions.resolve_output_folder(
+                main_window, self.media_path
+            )
+        except Exception as exc:
+            print(f"[ERROR] Could not resolve output folder: {exc}")
+            folder = ""
+
+        folder = os.path.normpath(os.path.abspath(folder)) if folder else ""
+        base_configured = str(
+            main_window.control.get("OutputMediaFolder", "") or ""
+        ).strip()
+        uses_target_location = bool(
+            main_window.control.get("OutputToTargetLocationToggle", False)
+        )
+        if not folder or (not base_configured and not uses_target_location):
+            QtWidgets.QMessageBox.information(
+                main_window,
+                "Output folder",
+                "No output folder is configured yet.\n"
+                "Set one in Settings > Output Folder.",
+            )
+            return
+
+        # The (cluster) sub-folder is only created on the first save: fall back
+        # to the nearest existing parent so the button still does something useful.
+        target = folder
+        while target and not os.path.isdir(target):
+            parent = os.path.dirname(target)
+            if parent == target:
+                target = ""
+                break
+            target = parent
+        if not target:
+            QtWidgets.QMessageBox.information(
+                main_window,
+                "Output folder",
+                f"The output folder does not exist yet:\n{folder}",
+            )
+            return
+        if target != folder:
+            print(
+                f"[INFO] Output folder {folder} does not exist yet; "
+                f"opening {target} instead."
+            )
+
+        try:
+            if sys.platform == "win32":
+                os.startfile(target)
+            elif sys.platform == "darwin":
+                subprocess.Popen(["open", target])
+            else:
+                subprocess.Popen(["xdg-open", target])
+        except Exception as exc:
+            print(f"[ERROR] Could not open output folder {target}: {exc}")
+
     def create_context_menu(self):
         from app.ui.widgets.actions import list_view_actions
 
@@ -605,6 +669,10 @@ class TargetMediaCardButton(CardButton):
         self.open_path_action = QtGui.QAction("Open file location", self)
         self.open_path_action.triggered.connect(self.open_target_path_by_explorer)
         self.popMenu.addAction(self.open_path_action)
+
+        self.open_output_action = QtGui.QAction("Open output folder", self)
+        self.open_output_action.triggered.connect(self.open_output_in_folder)
+        self.popMenu.addAction(self.open_output_action)
         self.popMenu.addSeparator()
 
         self.clear_all_media_action = QtGui.QAction("Clear All Media", self)
@@ -644,6 +712,7 @@ class TargetMediaCardButton(CardButton):
                 "remove_action",
                 "delete_action",
                 "open_path_action",
+                "open_output_action",
                 "clear_all_media_action",
                 "delete_all_files_action",
             )

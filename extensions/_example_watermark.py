@@ -21,9 +21,32 @@ Here are the rules for extension authors:
 ---------------------------------------------------------------------------------------------------------------------
 3. UI Modifications
 
-    You can add tabs, buttons, or sliders in setup() using main_window.tabWidget.addTab(...).
+    The Parameters tabs (Face Swap, Face Editor, Restorers, ...) are shown in a
+    full-width tab row directly below the menu bar. The right-hand Parameters
+    panel only shows the content of the selected tab and has no tab strip of
+    its own.
 
-    Do not delete or alter core UI elements (like the main video slider or the Play button), or the app will crash.
+    Add your own tab in setup() with:
+
+        main_window.add_parameter_tab(widget, "Title")      # recommended
+
+    (main_window.tabWidget.addTab(widget, "Title") still works and also shows
+    up in the top row, but add_parameter_tab is the supported way.)
+
+    - Keep the title SHORT (about 14 characters or less). The row is shared by
+      all tabs; when the window is too narrow it scrolls with small left/right
+      buttons and the mouse wheel, so long titles just make users scroll more.
+    - Your widget is displayed inside the (narrow) right panel, so lay it out
+      to wrap/shrink gracefully: use QVBoxLayout, word-wrapped labels and no
+      hard-coded wide widgets. Do not rely on the tab strip being above it.
+    - To switch to your tab from code use
+      main_window.tabWidget.setCurrentIndex(main_window.tabWidget.indexOf(widget)).
+      The visible tab row follows.
+    - Do NOT use main_window.tabWidget.tabBar(): that is a hidden internal bar.
+      The visible bar is main_window.topTabBar (read-only use, e.g. tooltips).
+    - The tab row hides/shows together with the Parameters panel (View menu).
+    - Do not delete or alter core UI elements (like the main video slider or
+      the Play button), or the app will crash.
 ---------------------------------------------------------------------------------------------------------------------
 4. Thread Safety
 
@@ -51,11 +74,11 @@ class MyExtension:
 def setup(main_window):
     ext = MyExtension(main_window)
     
-    # Rule 3: Add UI safely
+    # Rule 3: Add UI safely (the tab appears in the top tab row)
     tab = QtWidgets.QWidget()
     layout = QtWidgets.QVBoxLayout(tab)
     layout.addWidget(QtWidgets.QLabel("My Extension Settings"))
-    main_window.tabWidget.addTab(tab, "My Ext")
+    main_window.add_parameter_tab(tab, "My Ext")
     
     return ext
 
@@ -142,10 +165,20 @@ def setup(main_window):
     # Optional: Add a custom tab to the UI for the extension
     tab = QtWidgets.QWidget()
     layout = QtWidgets.QVBoxLayout(tab)
-    layout.addWidget(QtWidgets.QLabel("Watermark Extension Settings"))
+    # Tab content is shown in the narrow right panel: wrap text, avoid wide widgets.
+    label = QtWidgets.QLabel("Watermark Extension Settings")
+    label.setWordWrap(True)
+    layout.addWidget(label)
+    layout.addStretch()
     
-    # Add the tab to the main UI
-    main_window.tabWidget.addTab(tab, "Watermark")
+    # Add the tab to the main UI. It appears in the tab row below the menu
+    # bar; keep the title short because that row is shared by all tabs.
+    # Fall back to tabWidget.addTab for older builds without the top tab row.
+    add_tab = getattr(main_window, "add_parameter_tab", None)
+    if add_tab is not None:
+        add_tab(tab, "Watermark")
+    else:
+        main_window.tabWidget.addTab(tab, "Watermark")
     
     return ext
     

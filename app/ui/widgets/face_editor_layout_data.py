@@ -62,7 +62,7 @@ FACE_EDITOR_LAYOUT_DATA: Any = {  # noqa: F811
         },
 
         # ---------------- PROFILES ----------------
-        "__sep_profiles__": {"level": 1, "type": "separator", "label": "PROFILES", "help": ""},
+        "__sep_profiles__": {"level": 1, "type": "separator", "label": "PROFILES", "help": "", "parentToggle": "FaceEditorEnableToggle", "requiredToggleValue": True},
         "FaceEditorProfileSelection": {
             "level": 2,
             "label": "Profile",
@@ -106,7 +106,7 @@ FACE_EDITOR_LAYOUT_DATA: Any = {  # noqa: F811
         },
 
         # ---------------- HEAD POSE ----------------
-        "__sep_head_pose__": {"level": 1, "type": "separator", "label": "HEAD POSE ‍👩‍🦰", "help": ""},
+        "__sep_head_pose__": {"level": 1, "type": "separator", "label": "HEAD POSE ‍👩‍🦰", "help": "", "parentToggle": "FaceEditorEnableToggle", "requiredToggleValue": True},
         "HeadPitchSlider": {
             "level": 2,
             "label": "Head Pitch",
@@ -142,7 +142,7 @@ FACE_EDITOR_LAYOUT_DATA: Any = {  # noqa: F811
         },
 
         # ---------------- HEAD POSITION ----------------
-        "__sep_head_position__": {"level": 1, "type": "separator", "label": "HEAD POSITION 👤", "help": ""},
+        "__sep_head_position__": {"level": 1, "type": "separator", "label": "HEAD POSITION 👤", "help": "", "parentToggle": "FaceEditorEnableToggle", "requiredToggleValue": True},
         "XAxisMovementDecimalSlider": {
             "level": 2,
             "label": "X-Axis Movement",
@@ -181,7 +181,7 @@ FACE_EDITOR_LAYOUT_DATA: Any = {  # noqa: F811
         },
 
         # ---------------- EYES & EYEBROWS ----------------
-        "__sep_eyes__": {"level": 1, "type": "separator", "label": "EYES & EYEBROWS 👁", "help": ""},
+        "__sep_eyes__": {"level": 1, "type": "separator", "label": "EYES & EYEBROWS 👁", "help": "", "parentToggle": "FaceEditorEnableToggle", "requiredToggleValue": True},
         "EyesOpenRatioDecimalSlider": {
             "level": 2,
             "label": "Eyes Close ⇽⇾ Open",
@@ -244,7 +244,7 @@ FACE_EDITOR_LAYOUT_DATA: Any = {  # noqa: F811
         },
 
         # ---------------- MOUTH & LIPS ----------------
-        "__sep_mouth__": {"level": 1, "type": "separator", "label": "MOUTH & LIPS 👄", "help": ""},
+        "__sep_mouth__": {"level": 1, "type": "separator", "label": "MOUTH & LIPS 👄", "help": "", "parentToggle": "FaceEditorEnableToggle", "requiredToggleValue": True},
         "LipsOpenRatioDecimalSlider": {
             "level": 2,
             "label": "Lips Close ⇽⇾ Open",
@@ -318,7 +318,7 @@ FACE_EDITOR_LAYOUT_DATA: Any = {  # noqa: F811
         },
 
         # ---------------- MAKEUP - FACE ----------------
-        "__sep_makeup_face__": {"level": 1, "type": "separator", "label": "MAKEUP - FACE", "help": ""},
+        "__sep_makeup_face__": {"level": 1, "type": "separator", "label": "MAKEUP - FACE", "help": "", "parentToggle": "FaceEditorEnableToggle", "requiredToggleValue": True},
         "FaceMakeupEnableToggle": {
             "level": 1,
             "label": "Face Makeup",
@@ -372,7 +372,7 @@ FACE_EDITOR_LAYOUT_DATA: Any = {  # noqa: F811
         },
 
         # ---------------- MAKEUP - HAIR ----------------
-        "__sep_makeup_hair__": {"level": 1, "type": "separator", "label": "MAKEUP - HAIR", "help": ""},
+        "__sep_makeup_hair__": {"level": 1, "type": "separator", "label": "MAKEUP - HAIR", "help": "", "parentToggle": "FaceEditorEnableToggle", "requiredToggleValue": True},
         "HairMakeupEnableToggle": {
             "level": 1,
             "label": "Hair Makeup",
@@ -426,7 +426,7 @@ FACE_EDITOR_LAYOUT_DATA: Any = {  # noqa: F811
         },
 
         # ---------------- MAKEUP - EYEBROWS ----------------
-        "__sep_makeup_brows__": {"level": 1, "type": "separator", "label": "MAKEUP - EYEBROWS", "help": ""},
+        "__sep_makeup_brows__": {"level": 1, "type": "separator", "label": "MAKEUP - EYEBROWS", "help": "", "parentToggle": "FaceEditorEnableToggle", "requiredToggleValue": True},
         "EyeBrowsMakeupEnableToggle": {
             "level": 1,
             "label": "EyeBrows Makeup",
@@ -480,7 +480,7 @@ FACE_EDITOR_LAYOUT_DATA: Any = {  # noqa: F811
         },
 
         # ---------------- MAKEUP - LIPS ----------------
-        "__sep_makeup_lips__": {"level": 1, "type": "separator", "label": "MAKEUP - LIPS", "help": ""},
+        "__sep_makeup_lips__": {"level": 1, "type": "separator", "label": "MAKEUP - LIPS", "help": "", "parentToggle": "FaceEditorEnableToggle", "requiredToggleValue": True},
         "LipsMakeupEnableToggle": {
             "level": 1,
             "label": "Lips Makeup",
@@ -534,7 +534,7 @@ FACE_EDITOR_LAYOUT_DATA: Any = {  # noqa: F811
         },
 
         # ---------------- FACE SHAPING ----------------
-        "__sep_face_shaping__": {"level": 1, "type": "separator", "label": "FACE SHAPING", "help": ""},
+        "__sep_face_shaping__": {"level": 1, "type": "separator", "label": "FACE SHAPING", "help": "", "parentToggle": "FaceEditorEnableToggle", "requiredToggleValue": True},
         "FaceShapingEnableToggle": {
             "level": 1,
             "label": "Enable Face Shaping (2D Mesh)",

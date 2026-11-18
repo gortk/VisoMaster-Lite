@@ -28,6 +28,7 @@ from app.processors.utils import platform_support
 from app.processors.workers.function_worker import FunctionWorker
 from app.ui.widgets import widget_components
 from app.ui.widgets.trt_build_dialog import TrtBuildDialog
+from app.ui.widgets.top_tab_bar import install_top_tab_bar
 from app.ui.widgets.event_filters import (
     GraphicsViewEventFilter,
     VideoSeekSliderEventFilter,
@@ -654,6 +655,9 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
         common_widget_actions.update_gpu_memory_progressbar(self)
         # Set face_swap_tab as the default focused tab
         self.tabWidget.setCurrentIndex(0)
+        # Parameter tabs live in a full-width row below the menu bar; the
+        # QTabWidget only keeps showing the page contents in the right pane.
+        install_top_tab_bar(self, self.tabWidget, self.controlOptionsDockWidget)
         # widget_actions.add_groupbox_and_widgets_from_layout_map(self)
 
         # Connect Denoiser Mode SelectionBox signals to update visibility
@@ -1790,7 +1794,11 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
         self.createSegmentButton = QtWidgets.QPushButton("Create Segment", self.mediaLayout)
         self.createSegmentButton.setCheckable(True)
         self.createSegmentButton.setFlat(True)
-        self.createSegmentButton.setToolTip("Drag on the timeline to create a segment")
+        self.createSegmentButton.setToolTip(
+            "- Drag the mouse cursor over the seek bar to create a segment\n"
+            "- Right click on a segment to set its function\n"
+            "- Middle click to drag-move the currently selected segment"
+        )
         self.createSegmentButton.toggled.connect(
             partial(video_control_actions.toggle_segment_creation_mode, self)
         )

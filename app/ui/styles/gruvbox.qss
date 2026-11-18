@@ -442,6 +442,11 @@ QTabWidget::pane {
     border-top: 1px solid #504945;
 }
 
+#topTabSeparator {
+    background-color: #504945;
+    border: none;
+}
+
 QTabWidget::tab-bar {
     left: 5px;
 }
