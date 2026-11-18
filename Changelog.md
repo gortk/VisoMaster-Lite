@@ -1,9 +1,9 @@
 ### 1.0.9
 
 - Added new feature: tags for embeddings. Now you can right click on an embedding file and then "Tag", this will
-  open a pop up where you can put persistent tags to your embeddings. The search function for tags now also searches
+  open a pop up where you can put persistent tags to your embeddings. The search function for embeddings now also searches
   tags so you can now have easy access to certain type of embeddings when you need them e.g "brown eyes" will bring 
-  up the embeddings of people who have brown eyes.
+  up the embeddings of people who have brown eyes (if you tagged them).
   
 - Separated embeddings from the last_workspace file to a separate "last_workspace_embeddings.jsonl" file that will now
   contain your embeddings, so sharing the "last_workspace" file should not be a risk of privacy. ⚠ Always check your file
@@ -11,7 +11,7 @@
   it weights around 32 kb.
   
 - Lazy loading of embedding tabs; now the app loads all your tabs but doesn't really load the embeddings inside them until
-  you activate the tab. This should speed up a little more the startup times if you auto-load your workspace. 
+  you activate the tab. This should speed up a little more the startup times if you auto-loading your workspace. 
 
 ### 1.0.8
 
