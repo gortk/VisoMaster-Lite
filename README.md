@@ -1,19 +1,20 @@
 <img width="1672" height="941" alt="crappy-AI-made-logo" src="https://github.com/user-attachments/assets/e72adf9e-bd3f-41a4-93aa-c618f3fcbd57" />
 
 
-> [!CAUTION]
-> VisoMaster-Lite is only distributed through this repository.<br>
-> Do not download from third-party websites.<br>
+
 
 VisoMaster-Lite is a desktop application for AI-powered face swapping and enhancement on images and videos. It combines a graphical workflow with advanced model controls, batch processing, VR180 support, and GPU-accelerated inference. 
 
 Its father is VisoMaster-Fusion which has a lot of community based features.
 
-This fork will aim to preserve the app in a stricter way to avoid bloating it and will not be eager to implement cutting-edge features, expect no new models that are heavy on VRAM. The focus here is bug fixing and QoL so expect many changes!.
+This fork will aim to avoid bloating the app and will not be eager to implement cutting-edge features that sometimes are niche, expect no new models that are heavy on VRAM. It also has extension support so those niche features become optional. The focus here is bug fixing and QoL!.
 
 
 <img height="auto" alt="ZShDavGPNZ" src="https://github.com/user-attachments/assets/ba03cbd8-6010-42fb-8643-34b91d9d9a96" />
 
+> [!CAUTION]
+> VisoMaster-Lite is only distributed through this repository.<br>
+> Do not download from third-party websites.<br>
 
 *All faces shown in the screenshot are synthetic demo images used for illustration.*
 *This screenshot may be outdated*
