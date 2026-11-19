@@ -1,10 +1,5 @@
-# VisoMaster-Lite
+<img width="1672" height="941" alt="crappy-AI-made-logo" src="https://github.com/user-attachments/assets/e72adf9e-bd3f-41a4-93aa-c618f3fcbd57" />
 
-<img height="auto" alt="ZShDavGPNZ" src="https://github.com/user-attachments/assets/ba03cbd8-6010-42fb-8643-34b91d9d9a96" />
-
-
-*All faces shown in the screenshot are synthetic demo images used for illustration.*
-*This screenshot may be outdated*
 
 > [!CAUTION]
 > VisoMaster-Lite is only distributed through this repository.<br>
@@ -12,9 +7,17 @@
 
 VisoMaster-Lite is a desktop application for AI-powered face swapping and enhancement on images and videos. It combines a graphical workflow with advanced model controls, batch processing, VR180 support, and GPU-accelerated inference. 
 
-Its father is VisoMaster-Fusion which has a lot of community based features. Some of those features, I personally think that are redundant or doesn't have a use for most people. Since now AI enabled most of us to develop features, everybody is rushing to add its own niche feature and the lack of moderation is turning the app into bloatware slowly but steadily.
+Its father is VisoMaster-Fusion which has a lot of community based features.
 
-This fork will aim to preserve the app in a stricter way to avoid that happening again and will not be eager to implement cutting-edge features, expect no new models that are heavy on VRAM. The focus here is bug fixing and QoL.
+This fork will aim to preserve the app in a stricter way to avoid bloating it and will not be eager to implement cutting-edge features, expect no new models that are heavy on VRAM. The focus here is bug fixing and QoL so expect many changes!.
+
+
+<img height="auto" alt="ZShDavGPNZ" src="https://github.com/user-attachments/assets/ba03cbd8-6010-42fb-8643-34b91d9d9a96" />
+
+
+*All faces shown in the screenshot are synthetic demo images used for illustration.*
+*This screenshot may be outdated*
+
 
 ---------------
 ## 🧩 [EXTENSIONS](https://github.com/gortk/Visomaster-Lite-Extensions-Repo/tree/main)
