@@ -1,3 +1,7 @@
+### 1.0.11
+
+- New UI recoloring. Nothing special here.
+
 ### 1.0.10
 
 - New UI layout. Some will hate it, some will like it, but I think in the long run it will be better. We have to 
