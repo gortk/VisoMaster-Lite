@@ -1992,21 +1992,34 @@ def setup_embedding_tabs(main_window: "MainWindow") -> None:
     tabs.setUsesScrollButtons(True)
     tabs.tabBar().setExpanding(False)
     tabs.setStyleSheet(
-        """
-        QTabWidget::pane {
-            border: 1px solid #3a3a3a;
-            top: -1px;
-        }
-        QTabBar::tab {
-            padding: 4px 3px 4px 6px;
-            margin-right: 2px;
-        }
-        QTabBar::close-button {
-            subcontrol-position: right;
-            subcontrol-origin: padding;
-            margin: 2px;
-        }
-        """
+        "QTabWidget::pane { border: 1px solid #3a3a3a; top: -1px; }"
+        "QTabBar::tab {"
+        "  padding: 4px 3px 4px 6px;"
+        "  margin-right: 2px;"
+        "  background: #202020;"
+        "  color: #f0f0f0;"
+        "  font-weight: bold;"
+        "  border: 1px solid #363636;"
+        "  border-bottom-color: #363636;"
+        "}"
+        "QTabBar::tab:selected {"
+        "  background: #6C5CE7;"
+        "  color: #f0f0f0;"
+        "  font-weight: bold;"
+        "  border-color: #4A3AB5;"
+        "  border-bottom-color: #6C5CE7;"
+        "}"
+        "QTabBar::tab:hover:!selected {"
+        "  background: #352E4C;"
+        "  color: #f0f0f0;"
+        "  font-weight: bold;"
+        "  border-color: #6C5CE7;"
+        "}"
+        "QTabBar::close-button {"
+        "  subcontrol-position: right;"
+        "  subcontrol-origin: padding;"
+        "  margin: 2px;"
+        "}"
     )
 
     list_h = _EMBED_LIST_HEIGHT

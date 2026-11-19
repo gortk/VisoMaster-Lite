@@ -38,9 +38,18 @@ class ScrollableTabBar(QtWidgets.QTabBar):
         )
         # Scroll buttons: keep them unobtrusive and theme-neutral.
         self.setStyleSheet(
+            "QTabBar::tab { background: #202020; color: #f0f0f0;"
+            " font-weight: bold; border: 1px solid #363636;"
+            " border-bottom-color: #363636; padding: 4px 8px;"
+            " border-top-left-radius: 4px; border-top-right-radius: 4px; }"
+            "QTabBar::tab:selected { background: #6C5CE7; color: #f0f0f0;"
+            " font-weight: bold; border-color: #4A3AB5;"
+            " border-bottom-color: #6C5CE7; }"
+            "QTabBar::tab:hover:!selected { background: #352E4C;"
+            " color: #f0f0f0; font-weight: bold; border-color: #6C5CE7; }"
             "QTabBar QToolButton { background: transparent; border: none;"
             " margin: 0px; padding: 0px; }"
-            "QTabBar QToolButton:hover:enabled { background: rgba(128,128,128,70);"
+            "QTabBar QToolButton:hover:enabled { background: rgba(108,92,231,120);"
             " border-radius: 3px; }"
         )
 

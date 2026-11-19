@@ -2286,17 +2286,18 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
         search_row.addStretch(1)
         embed_layout.addWidget(self.media_readouts_row_widget)
 
-        # Force a dark background with a gray hover state for all embedding buttons
         btn_style = (
             "QPushButton {"
-            "  background-color: transparent;"
-            "  border: 1px solid #444;"
+            "  background-color: #202020;"
+            "  border: 1px solid #363636;"
             "  border-radius: 3px;"
             "  padding: 4px 8px;"
+            "  color: #f0f0f0;"
+            "  font-weight: bold;"
             "}"
             "QPushButton:hover {"
-            "  background-color: #3a3a3a;"
-            "  border: 1px solid #555;"
+            "  background-color: #2b2b2b;"
+            "  border: 1px solid #6C5CE7;"
             "}"
         )
 

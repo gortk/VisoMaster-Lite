@@ -620,7 +620,7 @@ def set_gpu_memory_progressbar_value(
 
     chunk_style_normal = """
         QProgressBar::chunk {
-            background-color: #16759e;
+            background-color: #6C5CE7;
             border-radius: 4px;
         }
     """

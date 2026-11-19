@@ -2688,7 +2688,7 @@ class ToggleButton(QtWidgets.QPushButton, ParametersWidget):
         self,
         bg_color="#000000",
         circle_color="#ffffff",
-        active_color="#4facc9",
+        active_color="#6C5CE7",
         default_value=False,
         *args,
         **kwargs,
@@ -3360,20 +3360,21 @@ class SectionHeaderButton(QtWidgets.QPushButton):
         fset=_set_indicator_angle,
     )
 
+
+
     def paintEvent(self, event):
         painter = QtGui.QPainter(self)
         painter.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
-
+    
         background_rect = self.rect().adjusted(0, 0, -1, -1)
-        background_color = self.palette().buttonText().color()
-        background_color.setAlpha(20 if self.underMouse() else 10)
-        painter.setPen(QtCore.Qt.PenStyle.NoPen)
-        painter.setBrush(background_color)
+    
+        painter.setPen(QtGui.QPen(QtGui.QColor("#38343D"), 1))
+        painter.setBrush(QtGui.QColor("#08050C"))
         painter.drawRoundedRect(background_rect, 4, 4)
-
+    
         painter.setPen(QtCore.Qt.PenStyle.NoPen)
         painter.setBrush(self.palette().buttonText())
-
+    
         triangle = QtGui.QPolygonF(
             [
                 QtCore.QPointF(-3.5, -4.5),
@@ -3381,23 +3382,29 @@ class SectionHeaderButton(QtWidgets.QPushButton):
                 QtCore.QPointF(4.5, 0),
             ]
         )
+    
         center = QtCore.QPointF(11, self.height() / 2)
         painter.translate(center)
         painter.rotate(self._indicator_angle)
         painter.drawPolygon(triangle)
         painter.resetTransform()
-
+    
         text_rect = self.rect().adjusted(24, 0, -8, 0)
         painter.setPen(self.palette().buttonText().color())
+    
         font = painter.font()
         font.setWeight(QtGui.QFont.Weight.Bold)
         painter.setFont(font)
+    
         painter.drawText(
             text_rect,
             QtCore.Qt.AlignmentFlag.AlignVCenter | QtCore.Qt.AlignmentFlag.AlignLeft,
             self._title,
         )
+    
         painter.end()
+
+
 
 
 class CollapsibleSection(QtWidgets.QWidget):
