@@ -4,6 +4,7 @@
 
 
 *All faces shown in the screenshot are synthetic demo images used for illustration.*
+*This screenshot may be outdated*
 
 > [!CAUTION]
 > VisoMaster-Lite is only distributed through this repository.<br>
@@ -25,7 +26,7 @@ userbase, meaning anybody can modify the app, share the extensions to others int
 Head to the repo to send yours or see whats in it. 
 
 ---
-[![Join us on Valour](https://img.shields.io/badge/Chat-on%20Valour-5865F2?logo=chatbot&logoColor=white)](https://valour.gg/i/31sllEe3#e2ee=31sllEe3.YMat9AeCDH_B7BKA2GdVig)
+[![Join me on Valour](https://img.shields.io/badge/Chat-on%20Valour-5865F2?logo=chatbot&logoColor=white)](https://valour.gg/i/31sllEe3#e2ee=31sllEe3.YMat9AeCDH_B7BKA2GdVig)
 
 
 > *Valour is an encrypted discord clone that lets you create an account only with an email, no phone numbers needed.*
