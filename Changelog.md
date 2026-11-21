@@ -1,3 +1,12 @@
+### 1.0.12
+
+- Hardened workspace loading to HOPEFULLY definetly fix the last_workspace.json file not being loaded/overwritten with 
+  defaults if: some option is not in the app anymore (code changes) or when closing the app with a target media still 
+  loaded in it.
+- Removed the leftover "Theater mode" in the View menu
+- New splash screen when loading the app.
+
+
 ### 1.0.11
 
 - New UI recoloring. Nothing special here.
