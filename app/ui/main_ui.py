@@ -229,8 +229,11 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
         self.embedding_editor_window = None
         self._workspace_load_done = False
         self._deferred_show = False
-        self._loading_splash = None
-        self._splash_timeout = None
+        # The splash is created at the very start of __init__; keep it if it exists.
+        if getattr(self, "_loading_splash", None) is None:
+            self._loading_splash = None
+        if getattr(self, "_splash_timeout", None) is None:
+            self._splash_timeout = None
         self._workspace_load_in_progress = False
         self._skip_autosave_last_workspace = False
         
@@ -987,15 +990,31 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
 
     def __init__(self, gpu_id=0):
         super(MainWindow, self).__init__()
+        # Show the splash before any of the slow start-up work below.
+        self._loading_splash = None
+        self._splash_timeout = None
+        self._workspace_load_done = False
+        try:
+            self._show_loading_splash()
+        except Exception as e:
+            print(f"[WARN] Could not show splash: {e}")
         self.gpu_id = gpu_id
         self.setupUi(self)
+        self._pump_splash()
         self._base_window_title = self.windowTitle()
         self.initialize_variables()
         self._apply_runtime_window_title()
+        self._pump_splash()
         self.initialize_widgets()
+        self._pump_splash()
         self.load_last_workspace()
         self.extension_manager = ExtensionManager(self)
         self.extension_manager.load_all()
+
+    def _pump_splash(self) -> None:
+        """Let the splash repaint between the slow start-up stages."""
+        if getattr(self, "_loading_splash", None) is not None:
+            QtWidgets.QApplication.processEvents()
 
     @QtCore.Slot(list)
     def handle_unload_request(self, model_names: list):
@@ -1096,31 +1115,57 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
     def _show_loading_splash(self) -> None:
         if self._loading_splash is not None:
             return
-        pixmap = QtGui.QPixmap(480, 220)
-        pixmap.fill(QtGui.QColor("#1a1a1a"))
-        painter = QtGui.QPainter(pixmap)
-        painter.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
-        painter.setPen(QtGui.QColor("#e0e0e0"))
-        title_font = QtGui.QFont("Segoe UI", 18)
-        title_font.setBold(True)
-        painter.setFont(title_font)
-        painter.drawText(
-            pixmap.rect().adjusted(0, 40, 0, 0),
-            QtCore.Qt.AlignmentFlag.AlignHCenter | QtCore.Qt.AlignmentFlag.AlignTop,
-            "VisoMaster Lite",
-        )
-        painter.setFont(QtGui.QFont("Segoe UI", 11))
-        painter.setPen(QtGui.QColor("#a0a0a0"))
-        painter.drawText(
-            pixmap.rect().adjusted(0, 100, 0, 0),
-            QtCore.Qt.AlignmentFlag.AlignHCenter | QtCore.Qt.AlignmentFlag.AlignTop,
-            "Loading workspace...",
-        )
-        painter.end()
+        screen = QtWidgets.QApplication.primaryScreen().availableGeometry()
+        splash_path = Path(__file__).resolve().parent / "core" / "media" / "splash.png"
+        pixmap = QtGui.QPixmap(str(splash_path))
+        if pixmap.isNull():
+            print(f"[WARN] Splash image not found or unreadable: {splash_path}")
+            # Fallback: the old drawn splash.
+            pixmap = QtGui.QPixmap(480, 220)
+            pixmap.fill(QtGui.QColor("#1a1a1a"))
+            painter = QtGui.QPainter(pixmap)
+            painter.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
+            painter.setPen(QtGui.QColor("#e0e0e0"))
+            title_font = QtGui.QFont("Segoe UI", 18)
+            title_font.setBold(True)
+            painter.setFont(title_font)
+            painter.drawText(
+                pixmap.rect().adjusted(0, 40, 0, 0),
+                QtCore.Qt.AlignmentFlag.AlignHCenter | QtCore.Qt.AlignmentFlag.AlignTop,
+                "VisoMaster Lite",
+            )
+            painter.setFont(QtGui.QFont("Segoe UI", 11))
+            painter.setPen(QtGui.QColor("#a0a0a0"))
+            painter.drawText(
+                pixmap.rect().adjusted(0, 100, 0, 0),
+                QtCore.Qt.AlignmentFlag.AlignHCenter | QtCore.Qt.AlignmentFlag.AlignTop,
+                "Loading workspace...",
+            )
+            painter.end()
+        else:
+            # Show the image at its real pixel size: without this, Windows display
+            # scaling (125-300%) magnifies it by the scale factor.
+            dpr = QtWidgets.QApplication.primaryScreen().devicePixelRatio() or 1.0
+            print(
+                f"[INFO] Splash image {pixmap.width()}x{pixmap.height()} px, "
+                f"screen scale factor {dpr}"
+            )
+            # Never larger than 80% of the screen; keeps the aspect ratio.
+            max_w = int(screen.width() * dpr * 0.8)
+            max_h = int(screen.height() * dpr * 0.8)
+            if pixmap.width() > max_w or pixmap.height() > max_h:
+                pixmap = pixmap.scaled(
+                    max_w,
+                    max_h,
+                    QtCore.Qt.AspectRatioMode.KeepAspectRatio,
+                    QtCore.Qt.TransformationMode.SmoothTransformation,
+                )
+            pixmap.setDevicePixelRatio(dpr)
 
         splash = QtWidgets.QSplashScreen(pixmap)
         splash.setWindowFlag(QtCore.Qt.WindowType.FramelessWindowHint, True)
-        screen = QtWidgets.QApplication.primaryScreen().availableGeometry()
+        # Not always-on-top, so dialogs shown during the load are never hidden by it.
+        splash.setWindowFlag(QtCore.Qt.WindowType.WindowStaysOnTopHint, False)
         splash.move(screen.center() - splash.rect().center())
         splash.show()
         QtWidgets.QApplication.processEvents()
@@ -1295,6 +1340,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
                 workspace_load_triggered = True
             else:
                 load_dialog = widget_components.LoadLastWorkspaceDialog(self)
+                self._hide_loading_splash()  # the question must not sit behind it
                 result = load_dialog.exec_()
                 workspace_load_triggered = (
                     result == QtWidgets.QDialog.DialogCode.Accepted
@@ -1645,12 +1691,6 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
             lambda: video_control_actions.zoom_current_image_100(self)
         )
 
-        theatre_action = QtGui.QAction("Theatre Mode\tT", self.menuView)
-        theatre_action.setCheckable(True)
-        theatre_action.triggered.connect(
-            lambda: video_control_actions.toggle_theatre_mode(self)
-        )
-
         face_compare_action = QtGui.QAction("Face Compare", self.menuView)
         face_compare_action.setCheckable(True)
         face_compare_action.setShortcut(QtGui.QKeySequence("X"))
@@ -1677,14 +1717,11 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
 
         self.actionView_FitToView = fit_action
         self.actionView_100Zoom = zoom_100_action
-        self.actionView_TheatreMode = theatre_action
         self.actionView_FaceCompare = face_compare_action
         self._view_mask_actions = mask_actions
 
         self.menuView.addAction(self.actionView_FitToView)
         self.menuView.addAction(self.actionView_100Zoom)
-        self.menuView.addSeparator()
-        self.menuView.addAction(self.actionView_TheatreMode)
         self.menuView.addSeparator()
         self.menuView.addAction(self.actionView_FaceCompare)
         self.menuView.addSeparator()
@@ -1693,7 +1730,6 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
 
         self.addAction(self.actionView_FitToView)
         self.addAction(self.actionView_100Zoom)
-        self.addAction(self.actionView_TheatreMode)
         self.menuView.aboutToShow.connect(self._sync_viewer_menu_actions)
         self._sync_viewer_menu_actions()
         self._view_navigation_actions_installed = True

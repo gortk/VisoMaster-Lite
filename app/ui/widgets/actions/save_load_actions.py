@@ -682,6 +682,75 @@ def load_parameters_and_settings(
             common_widget_actions.refresh_frame(main_window)
 
 
+def _salvage_json_object(text: str) -> dict:
+    """Recover every complete top-level key/value pair from a damaged JSON object."""
+    decoder = json.JSONDecoder()
+    out = {}
+    i = text.find("{")
+    if i < 0:
+        return out
+    i += 1
+    n = len(text)
+    ws = " \t\r\n"
+    while i < n:
+        while i < n and text[i] in ws + ",":
+            i += 1
+        if i >= n or text[i] == "}":
+            break
+        try:
+            key, i = decoder.raw_decode(text, i)
+            if not isinstance(key, str):
+                break
+            while i < n and text[i] in ws:
+                i += 1
+            if i >= n or text[i] != ":":
+                break
+            i += 1
+            while i < n and text[i] in ws:
+                i += 1
+            value, i = decoder.raw_decode(text, i)
+        except ValueError:
+            break
+        out[key] = value
+    return out
+
+
+def _read_workspace_candidate(path):
+    """Returns (data, salvaged). Never modifies, renames or deletes anything."""
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            text = f.read()
+    except (OSError, UnicodeDecodeError):
+        return None, False
+    try:
+        data = json.loads(text)
+        if isinstance(data, dict):
+            return data, False
+        return None, False
+    except ValueError:
+        data = _salvage_json_object(text)
+        return (data, True) if data else (None, False)
+
+
+def _pick_workspace_data(data_filename: str):
+    """Best readable data from the workspace file or its backups: (data, source, salvaged)."""
+    candidates = (data_filename, f"{data_filename}.bak", f"{data_filename}.bak2")
+    best_salvage = None
+    for cand in candidates:
+        if not os.path.isfile(cand):
+            continue
+        data, salvaged = _read_workspace_candidate(cand)
+        if data is None:
+            continue
+        if not salvaged:
+            return data, cand, False
+        if best_salvage is None or len(data) > len(best_salvage[0]):
+            best_salvage = (data, cand, True)
+    if best_salvage:
+        return best_salvage
+    return None, None, False
+
+
 def get_auto_load_workspace_toggle(
     main_window: "MainWindow", data_filename: str | bool = False
 ):
@@ -691,15 +760,42 @@ def get_auto_load_workspace_toggle(
         )
     if not isinstance(data_filename, str) or not data_filename:
         return False
-    _repair_workspace_file_if_needed(data_filename)
-    for _cand in (data_filename, f"{data_filename}.bak", f"{data_filename}.bak2"):
-        try:
-            with open(_cand, "r", encoding="utf-8") as data_file:
-                data = json.load(data_file)
-            return data.get("control", {}).get("AutoLoadWorkspaceToggle", False)
-        except (OSError, ValueError, AttributeError):
-            continue
-    return False
+    data, _src, _salv = _pick_workspace_data(data_filename)
+    if not isinstance(data, dict):
+        return False
+    control = data.get("control", {})
+    if not isinstance(control, dict):
+        return False
+    return control.get("AutoLoadWorkspaceToggle", False)
+
+
+def _record_failure(main_window, label: str, keys=()):
+    import traceback
+
+    traceback.print_exc()
+    main_window._workspace_failed_keys.update(keys)
+    main_window._workspace_load_errors.append(f"{label}: {traceback.format_exc().strip().splitlines()[-1]}")
+
+
+def _safe(main_window, label: str, fn, keys=()) -> bool:
+    """Run one part of the load; a failure is recorded and the load goes on."""
+    try:
+        fn()
+        return True
+    except Exception:
+        _record_failure(main_window, label, keys)
+        return False
+
+
+def _guard(main_window, label: str, keys, fn):
+    def _runner():
+        _safe(main_window, label, fn, keys)
+
+    return _runner
+
+
+def _schedule(main_window, fn, delay_ms: int = 0):
+    QtCore.QTimer.singleShot(delay_ms, fn)
 
 
 def load_saved_workspace(main_window, data_filename=False):
@@ -709,9 +805,8 @@ def load_saved_workspace(main_window, data_filename=False):
         data_filename, _ = QtWidgets.QFileDialog.getOpenFileName(
             main_window, filter="JSON (*.json)"
         )
-    if not isinstance(data_filename, str):
+    if not isinstance(data_filename, str) or not data_filename:
         return
-    _repair_workspace_file_if_needed(data_filename)
     bak_path = f"{data_filename}.bak"
     bak2_path = f"{data_filename}.bak2"
     if not (
@@ -720,63 +815,93 @@ def load_saved_workspace(main_window, data_filename=False):
         or Path(bak2_path).is_file()
     ):
         return
-    data = None
-    for _candidate in (data_filename, bak_path, bak2_path):
-        try:
-            with open(_candidate, "r", encoding="utf-8") as data_file:
-                data = json.load(data_file)
-            if _candidate != data_filename:
-                print(f"[WARN] Recovered workspace from {_candidate}")
-            break
-        except (json.JSONDecodeError, KeyError, TypeError, OSError):
-            continue
+
+    data, source, salvaged = _pick_workspace_data(data_filename)
     if data is None:
-        e = RuntimeError("workspace JSON and all backups unreadable")
-        broken_path = f"{data_filename}.broken.{int(time.time())}"
-        moved = False
-        try:
-            os.rename(data_filename, broken_path)
-            moved = True
-            print(f"[WARN] Broken workspace preserved as {broken_path}")
-        except OSError as re:
-            print(f"[WARN] Could not preserve broken workspace: {re}")
-        for _bkp in (bak_path, bak2_path):
-            try:
-                if os.path.exists(_bkp):
-                    os.rename(_bkp, f"{_bkp}.broken.{int(time.time())}")
-            except OSError:
-                pass
+        # Nothing readable. The files are left exactly as they are and saving over
+        # them is blocked, so nothing is lost and nothing is reset.
         main_window._workspace_load_failed = True
         QtWidgets.QMessageBox.critical(
             main_window,
             "Error",
-            f"Failed to load workspace: {e}"
-            + (f"\n\nOriginal preserved as:\n{broken_path}" if moved else ""),
+            "The workspace file could not be read.\n\n"
+            f"It was left untouched:\n{data_filename}\n\n"
+            "The app will not overwrite it on close.",
         )
         _notify_workspace_load_done(main_window)
         return
+
+    if source != data_filename or salvaged:
+        print(
+            f"[WARN] Workspace read from {source}"
+            + (" (damaged file, recovered every readable setting)" if salvaged else "")
+        )
+        # Keep a copy of the damaged file before a later save replaces it.
+        try:
+            if os.path.isfile(data_filename):
+                shutil.copy2(data_filename, f"{data_filename}.damaged")
+        except OSError as e:
+            print(f"[WARN] Could not copy damaged workspace: {e}")
+
     main_window._workspace_load_failed = False
+    main_window._workspace_original_data = copy.deepcopy(data)
+    main_window._workspace_failed_keys = set()
+    main_window._workspace_load_errors = []
     _workspace_load_begin(main_window, data, data_filename)
 
 
 def _workspace_load_begin(main_window, data, data_filename):
     main_window._workspace_load_in_progress = True
-    try:
-        window_state = data.get("window_state_data", {})
-        list_view_actions.clear_stop_loading_input_media(main_window)
-        list_view_actions.clear_stop_loading_target_media(main_window)
-        main_window.target_videos = {}
-        card_actions.clear_input_faces(main_window)
-        card_actions.clear_target_faces(main_window)
-        list_view_actions.reset_embedding_tabs(main_window)
 
-        control = sanitize_state_dictionary(data.get("control", {}), main_window.control)
-        for control_name, control_value in control.items():
-            main_window.control[control_name] = control_value
+    for label, fn in (
+        ("stop input loading", lambda: list_view_actions.clear_stop_loading_input_media(main_window)),
+        ("stop target loading", lambda: list_view_actions.clear_stop_loading_target_media(main_window)),
+        ("clear target videos", lambda: setattr(main_window, "target_videos", {})),
+        ("clear input faces", lambda: card_actions.clear_input_faces(main_window)),
+        ("clear target faces", lambda: card_actions.clear_target_faces(main_window)),
+        ("reset embedding tabs", lambda: list_view_actions.reset_embedding_tabs(main_window)),
+    ):
+        _safe(main_window, label, fn)
 
-        target_medias_data = data.get("target_medias_data", [])
-        target_medias_files_list = [m["media_path"] for m in target_medias_data]
-        target_media_ids = [m["media_id"] for m in target_medias_data]
+    def _apply_control():
+        loaded = data.get("control", {})
+        if not isinstance(loaded, dict):
+            raise ValueError("'control' is not an object")
+        for control_name in list(main_window.control.keys()):
+            if control_name in loaded:
+                main_window.control[control_name] = loaded[control_name]
+
+    _safe(main_window, "control settings", _apply_control, ("control",))
+
+    def _apply_current_params():
+        # Must happen BEFORE the target media is clicked below: new target faces
+        # copy their parameters from current_widget_parameters. Otherwise they are
+        # created from defaults and the next save writes those defaults.
+        raw = data.get("current_widget_parameters")
+        if not isinstance(raw, dict) or not raw:
+            return
+        defaults = main_window.default_parameters
+        default_data = defaults.data if hasattr(defaults, "data") else defaults
+        sanitized = sanitize_state_dictionary(raw, default_data)
+        main_window.current_widget_parameters = misc_helpers.ParametersDict(
+            sanitized, default_data
+        )
+
+    _safe(main_window, "saved face parameters", _apply_current_params,
+          ("current_widget_parameters",))
+
+    def _start_target_loader():
+        raw = data.get("target_medias_data", [])
+        if not isinstance(raw, list):
+            raise ValueError("'target_medias_data' is not a list")
+        files, ids = [], []
+        for m in raw:
+            try:
+                files.append(m["media_path"])
+                ids.append(m["media_id"])
+            except (KeyError, TypeError):
+                main_window._workspace_failed_keys.add("target_medias_data")
+                continue
 
         from app.ui.widgets.actions import target_videos_list_actions
         from app.ui.widgets import ui_workers
@@ -784,128 +909,130 @@ def _workspace_load_begin(main_window, data, data_filename):
         main_window.video_loader_worker = ui_workers.TargetMediaLoaderWorker(
             main_window=main_window,
             folder_name=False,
-            files_list=target_medias_files_list,
-            media_ids=target_media_ids,
+            files_list=files,
+            media_ids=ids,
             sort_files_list_by_name=False,
             metadata_enabled=target_videos_list_actions.current_sort_needs_metadata(main_window),
         )
         main_window.video_loader_worker.thumbnail_ready.connect(
-            partial(
-                list_view_actions.add_media_thumbnail_to_target_videos_list,
-                main_window,
-            ),
+            partial(list_view_actions.add_media_thumbnail_to_target_videos_list, main_window),
             QtCore.Qt.ConnectionType.QueuedConnection,
         )
         main_window.video_loader_worker.start()
-        QtCore.QTimer.singleShot(
+
+    started = _safe(main_window, "target media", _start_target_loader, ("target_medias_data",))
+    if started:
+        _schedule(
+            main_window,
+            partial(_poll_target_thumbnails_then_continue, main_window, data, data_filename),
             50,
-            partial(
-                _poll_target_thumbnails_then_continue,
-                main_window,
-                data,
-                data_filename,
-            ),
         )
-    except (KeyError, TypeError) as e:
-        # The chain is aborted, so the UI holds a half-loaded state. Block the
-        # autosave so it cannot overwrite the good file with that state.
-        main_window._workspace_load_failed = True
-        QtWidgets.QMessageBox.critical(
-            main_window, "Error", f"Failed to load workspace: {e}"
-        )
-        _notify_workspace_load_done(main_window)
+    else:
+        main_window.video_loader_worker = None
+        _schedule(main_window, partial(_workspace_after_targets, main_window, data, data_filename))
 
 
 def _poll_target_thumbnails_then_continue(main_window, data, data_filename):
-    worker = main_window.video_loader_worker
-    worker_running = worker is not None and worker.isRunning()
-    pending = list_view_actions._has_pending_target_media_thumbnail_work(main_window)
+    try:
+        worker = main_window.video_loader_worker
+        worker_running = worker is not None and worker.isRunning()
+        pending = list_view_actions._has_pending_target_media_thumbnail_work(main_window)
+    except Exception:
+        _record_failure(main_window, "waiting for target media", ())
+        worker_running = pending = False
     if worker_running or pending:
-        QtCore.QTimer.singleShot(
-            50, partial(_poll_target_thumbnails_then_continue, main_window, data, data_filename)
+        _schedule(
+            main_window,
+            partial(_poll_target_thumbnails_then_continue, main_window, data, data_filename),
+            50,
         )
         return
     _workspace_after_targets(main_window, data, data_filename)
 
 
 def _workspace_after_targets(main_window, data, data_filename):
-    try:
+    def _select_media():
         selected_media_id = data.get("selected_media_id", False)
         if selected_media_id and main_window.target_videos.get(selected_media_id):
             main_window.target_videos[selected_media_id].click()
 
-        input_media_paths = []
-        input_face_ids = []
-        for face_id, input_face_data in data.get("input_faces_data", {}).items():
-            input_media_paths.append(input_face_data["media_path"])
-            input_face_ids.append(face_id)
+    _safe(main_window, "selected target media", _select_media, ("selected_media_id",))
+
+    def _start_input_loader():
+        raw = data.get("input_faces_data", {})
+        if not isinstance(raw, dict):
+            raise ValueError("'input_faces_data' is not an object")
+        paths, ids = [], []
+        for face_id, input_face_data in raw.items():
+            try:
+                paths.append(input_face_data["media_path"])
+                ids.append(face_id)
+            except (KeyError, TypeError):
+                main_window._workspace_failed_keys.add("input_faces_data")
+                continue
 
         from app.ui.widgets import ui_workers
+
         main_window.input_faces_loader_worker = ui_workers.InputFacesLoaderWorker(
             main_window=main_window,
             folder_name=False,
-            files_list=input_media_paths,
-            face_ids=input_face_ids,
+            files_list=paths,
+            face_ids=ids,
         )
         main_window.input_faces_loader_worker.thumbnail_ready.connect(
-            partial(
-                list_view_actions.add_media_thumbnail_to_source_faces_list,
-                main_window,
-            ),
+            partial(list_view_actions.add_media_thumbnail_to_source_faces_list, main_window),
             QtCore.Qt.ConnectionType.QueuedConnection,
         )
         main_window.input_faces_loader_worker.finished.connect(
             partial(common_widget_actions.refresh_frame, main_window)
         )
         main_window.input_faces_loader_worker.start()
-        QtCore.QTimer.singleShot(
+
+    started = _safe(main_window, "input faces", _start_input_loader, ("input_faces_data",))
+    if started:
+        _schedule(
+            main_window,
+            partial(_poll_input_thumbnails_then_continue, main_window, data, data_filename),
             50,
-            partial(
-                _poll_input_thumbnails_then_continue,
-                main_window,
-                data,
-                data_filename,
-            ),
         )
-    except (KeyError, TypeError) as e:
-        # The chain is aborted, so the UI holds a half-loaded state. Block the
-        # autosave so it cannot overwrite the good file with that state.
-        main_window._workspace_load_failed = True
-        QtWidgets.QMessageBox.critical(
-            main_window, "Error", f"Failed to load workspace: {e}"
-        )
-        _notify_workspace_load_done(main_window)
+    else:
+        main_window.input_faces_loader_worker = None
+        _schedule(main_window, partial(_workspace_after_inputs, main_window, data, data_filename))
 
 
 def _poll_input_thumbnails_then_continue(main_window, data, data_filename):
-    worker = main_window.input_faces_loader_worker
-    worker_running = worker is not None and worker.isRunning()
-    pending = bool(getattr(main_window, "_pending_input_face_thumbnails", None))
-    timer = getattr(main_window, "_input_face_batch_timer", None)
-    timer_active = timer is not None and timer.isActive()
+    try:
+        worker = main_window.input_faces_loader_worker
+        worker_running = worker is not None and worker.isRunning()
+        pending = bool(getattr(main_window, "_pending_input_face_thumbnails", None))
+        timer = getattr(main_window, "_input_face_batch_timer", None)
+        timer_active = timer is not None and timer.isActive()
+    except Exception:
+        _record_failure(main_window, "waiting for input faces", ())
+        worker_running = pending = timer_active = False
     if worker_running or pending or timer_active:
-        QtCore.QTimer.singleShot(
-            50, partial(_poll_input_thumbnails_then_continue, main_window, data, data_filename)
+        _schedule(
+            main_window,
+            partial(_poll_input_thumbnails_then_continue, main_window, data, data_filename),
+            50,
         )
         return
     _workspace_after_inputs(main_window, data, data_filename)
 
 
 def _workspace_after_inputs(main_window, data, data_filename):
-    try:
-        main_window.placeholder_update_signal.emit(main_window.inputFacesList, False)
-    except (KeyError, TypeError) as e:
-        # The chain is aborted, so the UI holds a half-loaded state. Block the
-        # autosave so it cannot overwrite the good file with that state.
-        main_window._workspace_load_failed = True
-        QtWidgets.QMessageBox.critical(
-            main_window, "Error", f"Failed to load workspace: {e}"
-        )
-        _notify_workspace_load_done(main_window)
-        return
+    _safe(
+        main_window,
+        "input faces placeholder",
+        lambda: main_window.placeholder_update_signal.emit(main_window.inputFacesList, False),
+    )
 
     steps = []
 
+    def _add(label, keys, fn):
+        steps.append(_guard(main_window, label, keys, fn))
+
+    # ---- input face K/V maps (one guarded step per face) ----
     def _load_input_kv(face_id, input_face_data):
         input_face_button = main_window.input_faces.get(face_id)
         if input_face_button is None:
@@ -914,23 +1041,23 @@ def _workspace_after_inputs(main_window, data, data_filename):
         media_path = input_face_data.get("media_path")
         if not (kv_map_path and os.path.exists(kv_map_path)):
             return
-        try:
-            payload = torch.load(kv_map_path, map_location="cpu", weights_only=False)
-            input_face_button.kv_map = (
-                payload.get("kv_map") if isinstance(payload, dict) else payload
-            )
-            parents = [str(data_filename)]
-            if media_path:
-                parents.append(str(media_path))
-            _update_registry(
-                main_window, Path(kv_map_path).name, parents, "reference_kv_data"
-            )
-        except Exception as e:
-            print(f"[ERROR] Error loading K/V map from {kv_map_path}: {e}")
+        payload = torch.load(kv_map_path, map_location="cpu", weights_only=False)
+        input_face_button.kv_map = (
+            payload.get("kv_map") if isinstance(payload, dict) else payload
+        )
+        parents = [str(data_filename)]
+        if media_path:
+            parents.append(str(media_path))
+        _update_registry(main_window, Path(kv_map_path).name, parents, "reference_kv_data")
 
-    for face_id, input_face_data in data.get("input_faces_data", {}).items():
-        steps.append(partial(_load_input_kv, face_id, input_face_data))
+    raw_inputs = data.get("input_faces_data", {})
+    if isinstance(raw_inputs, dict):
+        for face_id, input_face_data in raw_inputs.items():
+            if isinstance(input_face_data, dict):
+                _add(f"input face K/V {face_id}", ("input_faces_data",),
+                     partial(_load_input_kv, face_id, input_face_data))
 
+    # ---- embeddings ----
     def _load_embedding(embedding_id, embedding_data):
         embedding_store_loaded = {
             m: np.array(e) for m, e in embedding_data["embedding_store"].items()
@@ -961,46 +1088,33 @@ def _workspace_after_inputs(main_window, data, data_filename):
             else:
                 embed_button.kv_map = payload
             _update_registry(
-                main_window,
-                Path(kv_map_path).name,
-                str(data_filename),
-                "reference_kv_data",
+                main_window, Path(kv_map_path).name, str(data_filename), "reference_kv_data"
             )
         except Exception as e:
             print(f"[ERROR] Error loading K/V map for embedding from {kv_map_path}: {e}")
 
     saved_tabs_state = data.get("embedding_tabs_state")
     external_tabs_file = (
-        saved_tabs_state.get("external_file")
-        if isinstance(saved_tabs_state, dict)
-        else None
+        saved_tabs_state.get("external_file") if isinstance(saved_tabs_state, dict) else None
     )
+    embedding_keys = ("embeddings_data", "embedding_tabs_state")
     if external_tabs_file:
-        # New format: the workspace only points at the separate embedding tabs
-        # file; the embeddings are loaded lazily, one tab at a time.
-        steps.append(
-            partial(
-                _restore_embedding_tabs_from_file,
-                main_window,
-                data_filename,
-                saved_tabs_state,
-            )
-        )
+        _add("embedding tabs file", embedding_keys,
+             partial(_restore_embedding_tabs_from_file, main_window, data_filename, saved_tabs_state))
     else:
-        # Older workspaces and manually saved workspaces keep embeddings inline.
-        for embedding_id, embedding_data in data.get("embeddings_data", {}).items():
-            steps.append(partial(_load_embedding, embedding_id, embedding_data))
+        raw_embeddings = data.get("embeddings_data", {})
+        if isinstance(raw_embeddings, dict):
+            for embedding_id, embedding_data in raw_embeddings.items():
+                _add(f"embedding {embedding_id}", embedding_keys,
+                     partial(_load_embedding, embedding_id, embedding_data))
+        _add("embedding tabs", embedding_keys,
+             partial(list_view_actions.restore_embedding_tabs_state, main_window,
+                     saved_tabs_state if isinstance(saved_tabs_state, dict) else {}))
 
-        steps.append(
-            partial(
-                list_view_actions.restore_embedding_tabs_state,
-                main_window,
-                data.get("embedding_tabs_state", {}),
-            )
-        )
+    # ---- segments / markers / issue frames (each part isolated) ----
+    default_params = main_window.default_parameters
 
-    def _restore_markers_controls():
-        video_control_actions.remove_all_markers(main_window)
+    def _restore_segments():
         loaded_segments = data.get("segments")
         if not isinstance(loaded_segments, list):
             loaded_segments = []
@@ -1015,52 +1129,55 @@ def _workspace_after_inputs(main_window, data, data_filename):
                 s = data.get("job_start_frame", None)
                 e = data.get("job_end_frame", None)
                 if s is not None and e is not None and int(s) < int(e):
-                    loaded_segments = [
-                        {"start": int(s), "end": int(e), "kind": "normal"}
-                    ]
-        default_params = main_window.default_parameters
+                    loaded_segments = [{"start": int(s), "end": int(e), "kind": "normal"}]
         normalized_segments = []
         for s in loaded_segments:
-            entry = {
-                "start": int(s["start"]),
-                "end": int(s["end"]),
-                "kind": s.get("kind", "normal"),
-                "parameters": None,
-                "control": s.get("control"),
-            }
-            raw_params = s.get("parameters")
-            if raw_params is not None:
-                entry["parameters"] = {
-                    str(fid): misc_helpers.ParametersDict(
-                        pd if isinstance(pd, dict) else dict(pd),
-                        default_params.data,
-                    )
-                    for fid, pd in raw_params.items()
+            try:
+                entry = {
+                    "start": int(s["start"]),
+                    "end": int(s["end"]),
+                    "kind": s.get("kind", "normal"),
+                    "parameters": None,
+                    "control": s.get("control"),
                 }
-            normalized_segments.append(entry)
+                raw_params = s.get("parameters")
+                if raw_params is not None:
+                    entry["parameters"] = {
+                        str(fid): misc_helpers.ParametersDict(
+                            pd if isinstance(pd, dict) else dict(pd), default_params.data
+                        )
+                        for fid, pd in raw_params.items()
+                    }
+                normalized_segments.append(entry)
+            except Exception:
+                _record_failure(main_window, "one segment", ("segments",))
         main_window.segments = normalized_segments
         main_window._in_normal_segment = False
         main_window._segments_base_parameters = main_window.parameters
         main_window._segments_base_control = main_window.control
+
+    def _restore_markers():
+        video_control_actions.remove_all_markers(main_window)
         raw_markers = data.get("markers", {})
-        sanitized_markers_dict = sanitize_markers_dictionary(main_window, raw_markers)
-        data["markers"] = convert_markers_to_supported_type(
-            main_window,
-            cast(MarkerTypes, sanitized_markers_dict),
-            misc_helpers.ParametersDict,
-        )
-        for marker_position, marker_data in data["markers"].items():
-            video_control_actions.add_marker(
-                main_window,
-                marker_data["parameters"],
-                marker_data["control"],
-                int(marker_position),
-            )
-        loaded_issue_frames_by_face = data.get("issue_frames_by_face")
-        if loaded_issue_frames_by_face is not None:
-            video_control_actions.set_issue_frames_by_face(
-                main_window, loaded_issue_frames_by_face
-            )
+        if not isinstance(raw_markers, dict):
+            raise ValueError("'markers' is not an object")
+        for marker_position, marker_data in raw_markers.items():
+            try:
+                single = sanitize_markers_dictionary(main_window, {marker_position: marker_data})
+                single = convert_markers_to_supported_type(
+                    main_window, cast(MarkerTypes, single), misc_helpers.ParametersDict
+                )
+                md = single[marker_position]
+                video_control_actions.add_marker(
+                    main_window, md["parameters"], md["control"], int(marker_position)
+                )
+            except Exception:
+                _record_failure(main_window, f"marker {marker_position}", ("markers",))
+
+    def _restore_issue_frames():
+        loaded = data.get("issue_frames_by_face")
+        if loaded is not None:
+            video_control_actions.set_issue_frames_by_face(main_window, loaded)
         else:
             selected_face_id = getattr(main_window, "selected_target_face_id", None)
             if selected_face_id is None and getattr(main_window, "target_faces", {}):
@@ -1071,64 +1188,61 @@ def _workspace_after_inputs(main_window, data, data_filename):
                 )
             else:
                 video_control_actions.set_issue_frames_by_face(main_window, {})
-        video_control_actions.set_dropped_frames(
-            main_window, data.get("dropped_frames", [])
-        )
+
+    def _restore_dropped_frames():
+        video_control_actions.set_dropped_frames(main_window, data.get("dropped_frames", []))
         main_window.videoSeekSlider.update()
         video_control_actions.update_drop_frame_button_label(main_window)
-        main_window.last_target_media_folder_path = data.get(
-            "last_target_media_folder_path", ""
-        )
-        main_window.last_input_media_folder_path = data.get(
-            "last_input_media_folder_path", ""
-        )
-        main_window.targetVideosPathLineEdit.setText(
-            main_window.last_target_media_folder_path
-        )
-        main_window.targetVideosPathLineEdit.setToolTip(
-            main_window.last_target_media_folder_path
-        )
-        main_window.inputFacesPathLineEdit.setText(
-            main_window.last_input_media_folder_path
-        )
-        main_window.inputFacesPathLineEdit.setToolTip(
-            main_window.last_input_media_folder_path
-        )
+
+    def _restore_folder_paths():
+        main_window.last_target_media_folder_path = data.get("last_target_media_folder_path", "")
+        main_window.last_input_media_folder_path = data.get("last_input_media_folder_path", "")
+        main_window.targetVideosPathLineEdit.setText(main_window.last_target_media_folder_path)
+        main_window.targetVideosPathLineEdit.setToolTip(main_window.last_target_media_folder_path)
+        main_window.inputFacesPathLineEdit.setText(main_window.last_input_media_folder_path)
+        main_window.inputFacesPathLineEdit.setToolTip(main_window.last_input_media_folder_path)
         if not data.get("embedding_tabs_state"):
-            main_window.loaded_embedding_filename = data.get(
-                "loaded_embedding_filename", ""
-            )
+            main_window.loaded_embedding_filename = data.get("loaded_embedding_filename", "")
+
+    def _restore_control_widgets():
         common_widget_actions.set_control_widgets_values(main_window)
+
+    def _restore_output_folder():
         output_folder = main_window.control.get("OutputMediaFolder", "")
-        common_widget_actions.create_control(
-            main_window, "OutputMediaFolder", output_folder
-        )
-        list_view_actions.set_target_folder_auto_watch(
-            main_window,
-            bool(main_window.control.get("AutoLoadTargetFolderToggle", False)),
-        )
+        common_widget_actions.create_control(main_window, "OutputMediaFolder", output_folder)
         main_window.outputFolderLineEdit.setText(output_folder)
 
-    steps.append(_restore_markers_controls)
+    def _restore_auto_watch():
+        list_view_actions.set_target_folder_auto_watch(
+            main_window, bool(main_window.control.get("AutoLoadTargetFolderToggle", False))
+        )
 
-    def _restore_tab_order_and_selection():
-        if "tab_state" in data:
-            tab_state = data["tab_state"]
-            tab_texts = {}
-            for i in range(main_window.tabWidget.count()):
-                tab_texts[main_window.tabWidget.tabText(i)] = i
-            for i, tab_info in enumerate(tab_state["tab_order"]):
-                tab_text = tab_info["text"]
-                if tab_text in tab_texts:
-                    current_index = tab_texts[tab_text]
-                    if current_index != i:
-                        main_window.tabWidget.tabBar().moveTab(current_index, i)
-                        tab_texts = {}
-                        for j in range(main_window.tabWidget.count()):
-                            tab_texts[main_window.tabWidget.tabText(j)] = j
-            if "current_tab_index" in tab_state:
-                main_window.tabWidget.setCurrentIndex(tab_state["current_tab_index"])
+    _add("segments", ("segments", "job_marker_pairs"), _restore_segments)
+    _add("markers", ("markers",), _restore_markers)
+    _add("issue frames", ("issue_frames_by_face", "issue_frames"), _restore_issue_frames)
+    _add("dropped frames", ("dropped_frames",), _restore_dropped_frames)
+    _add("folder paths", ("last_target_media_folder_path", "last_input_media_folder_path", "loaded_embedding_filename"), _restore_folder_paths)
+    _add("control widgets", ("control",), _restore_control_widgets)
+    _add("output folder", ("control",), _restore_output_folder)
+    _add("auto watch", (), _restore_auto_watch)
 
+    # ---- tab order / face selection / current parameters (isolated) ----
+    def _restore_tab_order():
+        tab_state = data.get("tab_state")
+        if not isinstance(tab_state, dict):
+            return
+        tab_texts = {main_window.tabWidget.tabText(i): i for i in range(main_window.tabWidget.count())}
+        for i, tab_info in enumerate(tab_state.get("tab_order", [])):
+            tab_text = tab_info["text"]
+            if tab_text in tab_texts:
+                current_index = tab_texts[tab_text]
+                if current_index != i:
+                    main_window.tabWidget.tabBar().moveTab(current_index, i)
+                    tab_texts = {main_window.tabWidget.tabText(j): j for j in range(main_window.tabWidget.count())}
+        if "current_tab_index" in tab_state:
+            main_window.tabWidget.setCurrentIndex(tab_state["current_tab_index"])
+
+    def _restore_face_selection():
         if main_window.target_faces:
             saved_face_id = data.get("selected_target_face_id")
             first_face_id = (
@@ -1154,108 +1268,98 @@ def _workspace_after_inputs(main_window, data, data_filename):
                     btn = main_window.merged_embeddings.get(embedding_id)
                     if btn:
                         btn.setChecked(True)
-                main_window.current_kv_tensors_map = getattr(
-                    first_face_button, "assigned_kv_map", None
-                )
+                main_window.current_kv_tensors_map = getattr(first_face_button, "assigned_kv_map", None)
             video_control_actions.refresh_issue_frames_for_selected_face(main_window)
             video_control_actions.update_scan_review_button_states(main_window)
-            common_widget_actions.set_widgets_values_using_face_id_parameters(
-                main_window, face_id=first_face_id
-            )
-            main_window.current_widget_parameters = main_window.parameters[
-                first_face_id
-            ].copy()
+            common_widget_actions.set_widgets_values_using_face_id_parameters(main_window, face_id=first_face_id)
+            main_window.current_widget_parameters = main_window.parameters[first_face_id].copy()
         else:
-            raw_current_params = data.get(
-                "current_widget_parameters",
-                cast(
-                    misc_helpers.ParametersDict, main_window.default_parameters
-                ).data.copy(),
-            )
-            default_params = cast(
-                misc_helpers.ParametersDict, main_window.default_parameters
-            ).data
-            sanitized_current_params = sanitize_state_dictionary(
-                raw_current_params, default_params
-            )
+            raw_current_params = data.get("current_widget_parameters", default_params.data.copy())
+            sanitized_current_params = sanitize_state_dictionary(raw_current_params, default_params.data)
             main_window.current_widget_parameters = cast(
                 ParametersTypes,
-                misc_helpers.ParametersDict(sanitized_current_params, default_params),
+                misc_helpers.ParametersDict(sanitized_current_params, default_params.data),
             )
-            common_widget_actions.set_widgets_values_using_face_id_parameters(
-                main_window, face_id=None
-            )
+            common_widget_actions.set_widgets_values_using_face_id_parameters(main_window, face_id=None)
+
+    def _restore_edit_buttons():
         main_window.swapfacesButton.setChecked(data.get("swap_faces_enabled", False))
         main_window.editFacesButton.setChecked(data.get("edit_faces_enabled", False))
         control_actions.handle_face_editor_button_click(main_window)
 
-    steps.append(_restore_tab_order_and_selection)
+    _add("tab order", ("tab_state",), _restore_tab_order)
+    _add("face selection / parameters", ("current_widget_parameters",), _restore_face_selection)
+    _add("swap/edit buttons", ("swap_faces_enabled", "edit_faces_enabled"), _restore_edit_buttons)
 
-    def _restore_window_state():
-        window_state = data.get("window_state_data", {})
-        needs_post_restore_frame_clamp = _apply_workspace_window_state(
-            main_window, window_state
-        )
+    # ---- window state (every part isolated) ----
+    window_state = data.get("window_state_data", {})
+    if not isinstance(window_state, dict):
+        window_state = {}
+    wkeys = ("window_state_data",)
+    clamp_needed = {"v": False}
+
+    def _ws_geometry():
+        clamp_needed["v"] = _apply_workspace_window_state(main_window, window_state)
+
+    def _ws_panels():
         panel_state_map = {
-            "target_media": window_state.get(
-                "target_media", window_state.get("TargetMediaCheckBox", True)
-            ),
-            "input_faces": window_state.get(
-                "input_faces", window_state.get("InputFacesCheckBox", True)
-            ),
-            "faces": window_state.get(
-                "faces", window_state.get("facesPanelCheckBox", True)
-            ),
-            "parameters": window_state.get(
-                "parameters", window_state.get("parametersPanelCheckBox", True)
-            ),
+            "target_media": window_state.get("target_media", window_state.get("TargetMediaCheckBox", True)),
+            "input_faces": window_state.get("input_faces", window_state.get("InputFacesCheckBox", True)),
+            "faces": window_state.get("faces", window_state.get("facesPanelCheckBox", True)),
+            "parameters": window_state.get("parameters", window_state.get("parametersPanelCheckBox", True)),
         }
         for panel_key, visible in panel_state_map.items():
             main_window._set_panel_visibility(panel_key, visible)
-        saved_face_thumbnail_size = window_state.get("face_thumbnail_size")
-        if saved_face_thumbnail_size == "small":
-            list_view_actions.apply_face_thumbnail_size(
-                main_window, list_view_actions._SMALL_FACE_BUTTON_SIZE
-            )
-        elif saved_face_thumbnail_size == "large":
-            list_view_actions.apply_face_thumbnail_size(
-                main_window, list_view_actions._LARGE_FACE_BUTTON_SIZE
-            )
+
+    def _ws_face_thumbs():
+        size = window_state.get("face_thumbnail_size")
+        if size == "small":
+            list_view_actions.apply_face_thumbnail_size(main_window, list_view_actions._SMALL_FACE_BUTTON_SIZE)
+        elif size == "large":
+            list_view_actions.apply_face_thumbnail_size(main_window, list_view_actions._LARGE_FACE_BUTTON_SIZE)
         else:
-            list_view_actions.apply_face_thumbnail_size(
-                main_window, list_view_actions._FACE_BUTTON_SIZE
-            )
-        saved_target_thumb_size = window_state.get("target_thumbnail_size")
-        if saved_target_thumb_size:
-            list_view_actions.apply_target_thumbnail_size(
-                main_window, tuple(saved_target_thumb_size)
-            )
+            list_view_actions.apply_face_thumbnail_size(main_window, list_view_actions._FACE_BUTTON_SIZE)
+
+    def _ws_target_thumbs():
+        saved = window_state.get("target_thumbnail_size")
+        if saved:
+            list_view_actions.apply_target_thumbnail_size(main_window, tuple(saved))
+
+    def _ws_scan_tools():
         if hasattr(main_window, "scanToolsToggleButton"):
             video_control_actions.set_scan_tools_expanded(
                 main_window, window_state.get("scan_tools_expanded", False)
             )
-        parameter_section_states = None
+
+    def _ws_sections():
+        states = None
         if "parameter_section_states" in window_state:
-            parameter_section_states = window_state["parameter_section_states"]
+            states = window_state["parameter_section_states"]
         elif "parameter_section_states" in data:
-            parameter_section_states = data["parameter_section_states"]
-        main_window.apply_parameter_section_states(parameter_section_states)
+            states = data["parameter_section_states"]
+        main_window.apply_parameter_section_states(states)
+
+    def _ws_filter():
         filter_actions.filter_target_videos(main_window)
+
+    def _ws_dock():
         dock_state_str = window_state.get("dock_state", data.get("dock_state", ""))
         if dock_state_str:
-            try:
-                ba = QtCore.QByteArray.fromBase64(dock_state_str.encode("utf-8"))
-                main_window.restoreState(ba)
-                main_window._refresh_panel_visibility_state_from_widgets()
-            except Exception as e:
-                print(f"[WARN] Failed to restore dock layout: {e}")
-        if needs_post_restore_frame_clamp:
-            QtCore.QTimer.singleShot(
-                0,
-                partial(_clamp_window_frame_to_available_geometry, main_window),
-            )
+            ba = QtCore.QByteArray.fromBase64(dock_state_str.encode("utf-8"))
+            main_window.restoreState(ba)
+            main_window._refresh_panel_visibility_state_from_widgets()
 
-    steps.append(_restore_window_state)
+    def _ws_clamp():
+        if clamp_needed["v"]:
+            QtCore.QTimer.singleShot(0, partial(_clamp_window_frame_to_available_geometry, main_window))
+
+    for label, fn in (
+        ("window geometry", _ws_geometry), ("panel visibility", _ws_panels),
+        ("face thumbnail size", _ws_face_thumbs), ("target thumbnail size", _ws_target_thumbs),
+        ("scan tools", _ws_scan_tools), ("parameter sections", _ws_sections),
+        ("target filter", _ws_filter), ("dock layout", _ws_dock), ("window clamp", _ws_clamp),
+    ):
+        _add(label, wkeys, fn)
 
     _run_workspace_steps(main_window, steps, 0)
 
@@ -1309,11 +1413,10 @@ def _add_pending_tabs_inline(
 
 
 def _run_workspace_steps(main_window, steps, index, errors=None):
-    if errors is None:
-        errors = []
     if index >= len(steps):
+        errors = list(getattr(main_window, "_workspace_load_errors", []))
         if errors:
-            print(f"[WARN] Workspace loaded with {len(errors)} failed step(s).")
+            print(f"[WARN] Workspace loaded with {len(errors)} failed part(s).")
         _notify_workspace_load_done(main_window)
         if errors:
             QtWidgets.QMessageBox.warning(
@@ -1321,21 +1424,17 @@ def _run_workspace_steps(main_window, steps, index, errors=None):
                 "Workspace partially loaded",
                 f"{len(errors)} part(s) of the workspace could not be restored "
                 "(details in the console). Everything else was loaded.\n\n"
-                "Saving is still enabled, so the parts that failed will be "
-                "dropped from last_workspace.json on the next save.\n\n"
+                "The parts that failed are kept exactly as they were in "
+                "last_workspace.json; they will not be overwritten or reset.\n\n"
                 f"First error:\n{errors[0]}",
             )
         return
     try:
         steps[index]()
     except Exception:
-        import traceback
-
-        traceback.print_exc()
-        errors.append(traceback.format_exc())
+        _record_failure(main_window, f"step {index}", ())
     QtCore.QTimer.singleShot(
-        0,
-        partial(_run_workspace_steps, main_window, steps, index + 1, errors),
+        0, partial(_run_workspace_steps, main_window, steps, index + 1)
     )
 
 
@@ -1517,13 +1616,18 @@ def save_current_workspace(
         )
 
     current_params_to_save = {}
-    if isinstance(main_window.current_widget_parameters, misc_helpers.ParametersDict):
-        current_params_to_save = main_window.current_widget_parameters.data.copy()
-    elif isinstance(main_window.current_widget_parameters, dict):
-        current_params_to_save = main_window.current_widget_parameters.copy()
+    _params_src = main_window.current_widget_parameters
+    _sel_face = getattr(main_window, "selected_target_face_id", None)
+    if main_window.target_faces and _sel_face in main_window.parameters:
+        # Save what the user actually sees for the selected face.
+        _params_src = main_window.parameters[_sel_face]
+    if isinstance(_params_src, misc_helpers.ParametersDict):
+        current_params_to_save = _params_src.data.copy()
+    elif isinstance(_params_src, dict):
+        current_params_to_save = _params_src.copy()
     else:
         print(
-            f"[WARN] Unexpected type for current widget parameters: {type(main_window.current_widget_parameters)}. Saving empty dict."
+            f"[WARN] Unexpected type for current widget parameters: {type(_params_src)}. Saving empty dict."
         )
 
     data = {
@@ -1581,6 +1685,14 @@ def save_current_workspace(
     if data_filename:
         _is_last_ws = str(data_filename).endswith("last_workspace.json")
 
+        _failed_keys = set(getattr(main_window, "_workspace_failed_keys", ()) or ())
+        _original = getattr(main_window, "_workspace_original_data", None)
+        if _is_last_ws and _failed_keys and isinstance(_original, dict):
+            # Parts that could not be loaded keep their value from the file.
+            for _k in _failed_keys:
+                if _k in _original:
+                    data[_k] = copy.deepcopy(_original[_k])
+
         if _is_last_ws and getattr(main_window, "_workspace_load_in_progress", False):
             print("[WARN] Skipping last_workspace save: workspace load in progress")
             return
@@ -1590,8 +1702,11 @@ def save_current_workspace(
             return
 
         if use_tabs_file:
-            # Failure is logged inside; the workspace itself is still saved.
-            embedding_tabs_store.write_embedding_tabs_file(main_window, data_filename)
+            if _failed_keys & {"embeddings_data", "embedding_tabs_state"}:
+                print("[WARN] Embedding tabs failed to load; keeping the existing tabs file.")
+            else:
+                # Failure is logged inside; the workspace itself is still saved.
+                embedding_tabs_store.write_embedding_tabs_file(main_window, data_filename)
 
         tmp_path = f"{data_filename}.{os.getpid()}.{uuid.uuid4().hex[:8]}.tmp"
         bak_path = f"{data_filename}.bak"

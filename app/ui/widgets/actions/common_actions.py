@@ -864,9 +864,17 @@ def set_widgets_values_using_face_id_parameters(
             if widget:
                 # temporarily disable refreshing the frame to prevent slowing due to unnecessary processing
                 widget.enable_refresh_frame = False
-                # QUAL-05: Delegate to shared helper instead of inline isinstance chain
-                _set_single_widget_value(widget, parameter_value)
-                widget.enable_refresh_frame = True
+                try:
+                    # QUAL-05: Delegate to shared helper instead of inline isinstance chain
+                    _set_single_widget_value(widget, parameter_value)
+                except Exception as e:
+                    # One bad value must never stop the other widgets from loading.
+                    print(
+                        f"[WARN] Could not set widget '{parameter_name}' "
+                        f"to {parameter_value!r}: {e}"
+                    )
+                finally:
+                    widget.enable_refresh_frame = True
     finally:
         main_window._batch_update_in_progress = previous_batch_flag
         # Trigger a single refresh only if this function owns the outermost batch scope.
@@ -887,35 +895,47 @@ def set_control_widgets_values(main_window: "MainWindow", enable_exec_func=True)
     # PERF-01: Use the module-level pre-built constant instead of rebuilding the dict on every call
     all_widget_options = _ALL_CONTROL_WIDGET_OPTIONS
 
-    # Iterate through control items and update widgets
+    # Iterate through control items and update widgets.
+    # Every widget is isolated: one bad value or failing exec function must never
+    # stop the remaining settings from loading.
     for control_name, control_value in control.items():
         widget = parameter_widgets.get(control_name)
 
-        if widget:
-            # Temporarily disable frame refresh
-            widget.enable_refresh_frame = False
+        if not widget:
+            continue
 
-            # QUAL-05: Delegate to shared helper instead of inline isinstance chain
-            _set_single_widget_value(widget, control_value)
+        # Temporarily disable frame refresh
+        widget.enable_refresh_frame = False
+        try:
+            try:
+                # QUAL-05: Delegate to shared helper instead of inline isinstance chain
+                _set_single_widget_value(widget, control_value)
+            except Exception as e:
+                print(
+                    f"[WARN] Could not set control widget '{control_name}' "
+                    f"to {control_value!r}: {e}"
+                )
+                continue
 
             if enable_exec_func:
-                # Execute any associated function, if defined
-                widget_definition = all_widget_options.get(
-                    control_name
-                )  # Use .get() for safety
-                if widget_definition:
-                    exec_function_data = widget_definition.get("exec_function")
-                    if exec_function_data:
-                        # The functions in control_actions.py are typically (main_window, value, *additional_args)
-                        exec_args_from_layout = widget_definition.get(
-                            "exec_function_args", []
-                        )
-                        final_exec_args = [
-                            main_window,
-                            control_value,
-                        ] + exec_args_from_layout
-                        exec_function_data(*final_exec_args)
-
+                try:
+                    # Execute any associated function, if defined
+                    widget_definition = all_widget_options.get(control_name)
+                    if widget_definition:
+                        exec_function_data = widget_definition.get("exec_function")
+                        if exec_function_data:
+                            # The functions in control_actions.py are typically (main_window, value, *additional_args)
+                            exec_args_from_layout = widget_definition.get(
+                                "exec_function_args", []
+                            )
+                            exec_function_data(
+                                main_window, control_value, *exec_args_from_layout
+                            )
+                except Exception as e:
+                    print(
+                        f"[WARN] exec function for control '{control_name}' failed: {e}"
+                    )
+        finally:
             # Re-enable frame refresh
             widget.enable_refresh_frame = True
 
