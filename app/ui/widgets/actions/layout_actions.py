@@ -698,58 +698,6 @@ def show_hide_parameters_panel(main_window: "MainWindow", checked):
     fit_image_to_view_onchange(main_window)
 
 
-def show_hide_theatre_mode_panels(main_window: "MainWindow", checked):
-    # Collects the current state of all visible panel toggle actions/state
-    def collect_states():
-        return {
-            "target_media": main_window.panel_visibility_state.get(
-                "target_media", True
-            ),
-            "faces": main_window.panel_visibility_state.get("faces", True),
-            "parameters": main_window.panel_visibility_state.get("parameters", True),
-            "input_faces": main_window.panel_visibility_state.get("input_faces", True),
-        }
-
-    # Applies the saved states to the visible View-menu actions/state
-    def apply_states(states):
-        main_window._set_panel_visibility(
-            "target_media", states.get("target_media", True)
-        )
-        main_window._set_panel_visibility("faces", states.get("faces", True))
-        main_window._set_panel_visibility("parameters", states.get("parameters", True))
-        main_window._set_panel_visibility(
-            "input_faces", states.get("input_faces", True)
-        )
-
-    if checked:
-        # Entering Theatre Mode: Save normal states and apply theatre states (default all False/Hidden)
-        main_window._theatre_normal_panel_states = collect_states()
-        apply_states(
-            main_window._theatre_mode_panel_states
-            or {
-                "target_media": False,
-                "faces": False,
-                "parameters": False,
-                "input_faces": False,
-            }
-        )
-    else:
-        # Exiting Theatre Mode: Save theatre states and restore normal states (default all True/Visible)
-        main_window._theatre_mode_panel_states = collect_states()
-        apply_states(
-            main_window._theatre_normal_panel_states
-            or {
-                "target_media": True,
-                "faces": True,
-                "parameters": True,
-                "input_faces": True,
-            }
-        )
-        main_window._theatre_normal_panel_states = None
-
-    fit_image_to_view_onchange(main_window)
-
-
 def fit_image_to_view_onchange(main_window: "MainWindow", *args):
     pixmap_item = None
     # Secure image search

@@ -305,6 +305,9 @@
              <property name="text">
               <string/>
              </property>
+             <property name="toolTip">
+              <string>Jump backward by the number of frames set in Settings -&gt; Frame Skip Steps</string>
+             </property>
              <property name="icon">
               <iconset resource="media.qrc">
                <normaloff>:/media/media/frame_left.png</normaloff>:/media/media/frame_left.png</iconset>
@@ -425,6 +428,9 @@
              <property name="text">
               <string/>
              </property>
+             <property name="toolTip">
+              <string>Jump forward by the number of frames set in Settings -&gt; Frame Skip Steps</string>
+             </property>
              <property name="icon">
               <iconset resource="media.qrc">
                <normaloff>:/media/media/frame_right.png</normaloff>:/media/media/frame_right.png</iconset>
@@ -487,7 +493,7 @@
            <item>
             <widget class="QPushButton" name="previousMarkerButton">
              <property name="toolTip">
-              <string>Move to Previous Marker</string>
+              <string>Move to Previous Segment</string>
              </property>
              <property name="text">
               <string/>
@@ -504,7 +510,7 @@
            <item>
             <widget class="QPushButton" name="nextMarkerButton">
              <property name="toolTip">
-              <string>Move to Next Marker</string>
+              <string>Move to Next Segment</string>
              </property>
              <property name="text">
               <string/>

@@ -1,3 +1,15 @@
+### 1.0.13
+
+- Fixed leftover shortcut key to fullscreen mode causing a benign error in the console (still trying to trigger 
+  the fullscreen mode after its removal.
+- Fixed wrong tooltips for the segment navigation buttons, now the reference "segments" not "markers".
+- Added tooltips for the step-skip buttons that had none. Now they tell the user that the skip steps is set
+  on the Settings -> Frame skip step setting.  
+- Reconfigured some hotkeys to make them more "WASD" friendly: A,D = move 1 frame (back,forward) E,Q = move to 
+  the next segment (back,forward). The rest are the same: S = toggle swap R = record SPACE = play/pause. Removed
+  the fullscreen key.
+
+
 ### 1.0.12
 
 - Hardened workspace loading to HOPEFULLY definetly fix the last_workspace.json file not being loaded/overwritten with 
