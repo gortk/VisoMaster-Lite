@@ -138,6 +138,7 @@ def _create_button_from_entry(main_window: "MainWindow", entry: dict, workspace_
         return
     try:
         payload = torch.load(kv_map_path, map_location="cpu", weights_only=False)
+        save_load_actions.remember_loaded_kv_payload(main_window, payload, kv_map_path)
         if isinstance(payload, dict):
             if "kv_map_list" in payload:
                 button.kv_map_list = payload["kv_map_list"]

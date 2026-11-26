@@ -5,6 +5,7 @@ import io
 import time
 import shutil
 import threading
+import weakref
 from pathlib import Path
 import uuid
 import copy
@@ -143,57 +144,165 @@ def _update_registry(
                 print(f"[ERROR] Failed to write KV registry to {registry_path}: {e}")
 
 
-def _kv_payload_cache_signature(value, seen=None):
-    """Return a cheap mutation signature, or None for unsupported payload objects.
+_KV_PAYLOAD_KEYS = ("kv_map", "kv_map_list")
+_KV_SIGNATURE_MAX_DEPTH = 8
 
-    Tensor version counters detect in-place PyTorch updates without reading tensor
-    contents. Container identities and child signatures detect structural changes.
+
+def _kv_signature(value, leaves: list, depth: int = 0):
+    """Cheap, content-free signature of a K/V structure, or None if unsupported.
+
+    The structure (keys, list lengths, scalars) is compared by value. Every
+    tensor contributes its version counter, shape, dtype, device, stride and
+    requires_grad, and is appended to ``leaves`` so the caller can verify
+    *object identity* separately (via weak references). Nothing here reads
+    tensor data, so no GPU->CPU copy and no hashing is needed.
     """
-    if seen is None:
-        seen = set()
-
-    value_id = id(value)
-    if value_id in seen:
-        return ("cycle", value_id)
+    if depth > _KV_SIGNATURE_MAX_DEPTH:
+        return None
 
     if isinstance(value, torch.Tensor):
         try:
-            version = value._version
+            if value.layout != torch.strided:
+                return None
+            signature = (
+                "T",
+                value._version,  # raises on inference tensors -> not cached
+                tuple(value.shape),
+                str(value.dtype),
+                str(value.device),
+                tuple(value.stride()),
+                bool(value.requires_grad),
+            )
         except Exception:
-            # Some inference tensors do not expose a version counter. Do not cache
-            # these: serializing them is safer than risking a stale content hash.
             return None
-        return ("tensor", value_id, version)
+        leaves.append(value)
+        return signature
 
     if isinstance(value, dict):
-        seen.add(value_id)
         items = []
         for key, child in value.items():
-            child_signature = _kv_payload_cache_signature(child, seen)
+            child_signature = _kv_signature(child, leaves, depth + 1)
             if child_signature is None:
-                seen.remove(value_id)
                 return None
             items.append((key, child_signature))
-        seen.remove(value_id)
-        return ("dict", value_id, tuple(items))
+        return ("D", tuple(items))
 
     if isinstance(value, (list, tuple)):
-        seen.add(value_id)
         children = []
         for child in value:
-            child_signature = _kv_payload_cache_signature(child, seen)
+            child_signature = _kv_signature(child, leaves, depth + 1)
             if child_signature is None:
-                seen.remove(value_id)
                 return None
             children.append(child_signature)
-        seen.remove(value_id)
-        return (type(value).__name__, value_id, tuple(children))
+        return (type(value).__name__, tuple(children))
 
     if value is None or isinstance(value, (bool, int, float, str, bytes)):
         return (type(value).__name__, value)
 
-    # Unknown mutable/custom objects may change without changing identity.
+    # Unknown objects can change without changing identity: never cache them.
     return None
+
+
+def _kv_cache_target(payload):
+    """(payload_key, value) for the one-key payloads the app saves, else None."""
+    if isinstance(payload, dict) and len(payload) == 1:
+        key, value = next(iter(payload.items()))
+        if key in _KV_PAYLOAD_KEYS:
+            return key, value
+    return None
+
+
+def _kv_cache_get(main_window, payload, sub_folder: str, kv_data_dir: Path):
+    """Return the existing file for an unchanged payload, or None (cache miss)."""
+    target = _kv_cache_target(payload)
+    cache = getattr(main_window, "_kv_payload_save_cache", None)
+    if target is None or not cache:
+        return None
+    payload_key, value = target
+
+    with _KV_CACHE_LOCK:
+        entry = cache.get((str(sub_folder), payload_key, id(value)))
+    if entry is None:
+        return None
+    leaf_refs, signature, kv_map_file = entry
+
+    leaves: list = []
+    if _kv_signature(value, leaves) != signature or len(leaves) != len(leaf_refs):
+        return None
+    # Same *objects* (not merely same-shaped tensors). A dead weak reference
+    # means the original tensor was freed, so this entry is stale.
+    if any(ref() is not leaf for ref, leaf in zip(leaf_refs, leaves)):
+        return None
+
+    try:
+        same_dir = kv_map_file.parent == kv_data_dir or (
+            kv_map_file.parent.resolve() == kv_data_dir.resolve()
+        )
+        if same_dir and kv_map_file.is_file():
+            return kv_map_file
+    except OSError:
+        pass
+    return None
+
+
+def _kv_cache_put(main_window, payload, sub_folder: str, kv_map_file: Path) -> None:
+    """Remember that this exact set of tensors is stored in ``kv_map_file``.
+
+    Only weak references to the tensors are kept, so caching never keeps K/V
+    data (usually on the GPU) alive after a face or embedding is removed.
+    """
+    target = _kv_cache_target(payload)
+    if target is None:
+        return
+    payload_key, value = target
+
+    leaves: list = []
+    signature = _kv_signature(value, leaves)
+    if signature is None or not leaves:
+        return
+    try:
+        leaf_refs = tuple(weakref.ref(leaf) for leaf in leaves)
+    except TypeError:
+        return
+
+    with _KV_CACHE_LOCK:
+        cache = getattr(main_window, "_kv_payload_save_cache", None)
+        if cache is None:
+            cache = {}
+            main_window._kv_payload_save_cache = cache
+        # Drop entries whose tensors have been freed.
+        for key in [
+            k for k, (refs, _sig, _path) in cache.items()
+            if any(ref() is None for ref in refs)
+        ]:
+            del cache[key]
+        cache[(str(sub_folder), payload_key, id(value))] = (
+            leaf_refs,
+            signature,
+            Path(kv_map_file),
+        )
+
+
+def remember_loaded_kv_payload(
+    main_window: "MainWindow",
+    payload,
+    kv_map_path,
+    sub_folder: str = "reference_kv_data",
+) -> None:
+    """Call right after ``torch.load(kv_map_path)`` for a K/V payload.
+
+    The loaded tensors are, by construction, what ``kv_map_path`` contains, so
+    the next workspace save can reuse that file without re-serializing and
+    hashing them (this is what makes the very first close after a launch fast).
+    Safe to call with anything: unsupported payloads are simply ignored.
+    """
+    try:
+        path = Path(kv_map_path)
+        if not (path.name.startswith("kv_") and path.suffix == ".pt"):
+            return
+        _kv_cache_put(main_window, payload, sub_folder, path)
+    except Exception:
+        pass
 
 
 def _save_hashed_kv_payload(
@@ -202,43 +311,19 @@ def _save_hashed_kv_payload(
     sub_folder: str = "reference_kv_data",
     parent_file_paths: Optional[Union[str, List[str]]] = None,
 ) -> Optional[str]:
-    """Save a content-addressed K/V payload, reusing hashes for unchanged objects.
+    """Save a content-addressed K/V payload (``kv_<sha256>.pt``) and return its path.
 
-    The cache is scoped to this MainWindow and holds a strong reference to each
-    cached payload object, preventing Python object-id reuse. Tensor version
-    counters invalidate entries after in-place tensor updates. Registry updates
-    still happen on every call, including cache hits.
+    Serializing + hashing is the expensive part (and needs a GPU->CPU copy for
+    GPU tensors), so unchanged payloads are recognised by tensor identity and
+    version counters (see ``_kv_cache_get``) and skip it entirely. Registry
+    updates still happen on every call, including cache hits.
     """
     try:
-        # Callers wrap one K/V object in a one-key dict. Cache that underlying
-        # object rather than the short-lived wrapper created on every save.
-        cache_value = next(iter(payload.values())) if len(payload) == 1 else payload
-        cache_signature = _kv_payload_cache_signature(cache_value)
-        cache_key = (str(sub_folder), id(cache_value))
         kv_data_dir = main_window.project_root_path / "model_assets" / sub_folder
-        kv_map_file = None
 
-        cache = getattr(main_window, "_kv_payload_save_cache", None)
-        if cache is None:
-            cache = {}
-            main_window._kv_payload_save_cache = cache
+        kv_map_file = _kv_cache_get(main_window, payload, sub_folder, kv_data_dir)
 
-        if cache_signature is not None:
-            with _KV_CACHE_LOCK:
-                cached = cache.get(cache_key)
-                if (
-                    cached is not None
-                    and cached[0] is cache_value
-                    and cached[1] == cache_signature
-                    and cached[2].parent == kv_data_dir
-                    and cached[2].is_file()
-                ):
-                    kv_map_file = cached[2]
-
-        if kv_map_file is not None:
-            # No torch.save(), CPU copy, or SHA-256 pass on an unchanged payload.
-            pass
-        else:
+        if kv_map_file is None:
             buffer = io.BytesIO()
             torch.save(payload, buffer)
             buffer_bytes = buffer.getvalue()
@@ -256,9 +341,7 @@ def _save_hashed_kv_payload(
                     f"[INFO] K/V map {kv_map_file.name} already exists. Skipping disk write."
                 )
 
-            if cache_signature is not None:
-                with _KV_CACHE_LOCK:
-                    cache[cache_key] = (cache_value, cache_signature, kv_map_file)
+            _kv_cache_put(main_window, payload, sub_folder, kv_map_file)
 
         if parent_file_paths:
             _update_registry(
@@ -475,6 +558,7 @@ def open_embeddings_from_file(main_window: "MainWindow"):
                                 payload = torch.load(
                                     kv_map_path, map_location="cpu", weights_only=False
                                 )
+                                remember_loaded_kv_payload(main_window, payload, kv_map_path)
                                 if isinstance(payload, dict):
                                     if "kv_map_list" in payload:
                                         embed_button.kv_map_list = payload[
@@ -553,6 +637,7 @@ def load_embeddings_into_current_tab(
                             payload = torch.load(
                                 kv_map_path, map_location="cpu", weights_only=False
                             )
+                            remember_loaded_kv_payload(main_window, payload, kv_map_path)
                             if isinstance(payload, dict):
                                 if "kv_map_list" in payload:
                                     embed_button.kv_map_list = payload["kv_map_list"]
@@ -1128,6 +1213,7 @@ def _workspace_after_inputs(main_window, data, data_filename):
         if not (kv_map_path and os.path.exists(kv_map_path)):
             return
         payload = torch.load(kv_map_path, map_location="cpu", weights_only=False)
+        remember_loaded_kv_payload(main_window, payload, kv_map_path)
         input_face_button.kv_map = (
             payload.get("kv_map") if isinstance(payload, dict) else payload
         )
@@ -1166,6 +1252,7 @@ def _workspace_after_inputs(main_window, data, data_filename):
             return
         try:
             payload = torch.load(kv_map_path, map_location="cpu", weights_only=False)
+            remember_loaded_kv_payload(main_window, payload, kv_map_path)
             if isinstance(payload, dict):
                 if "kv_map_list" in payload:
                     embed_button.kv_map_list = payload["kv_map_list"]
