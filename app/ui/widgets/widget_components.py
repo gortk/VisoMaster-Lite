@@ -25,6 +25,10 @@ from app.ui.widgets.actions import list_view_actions
 import app.helpers.miscellaneous as misc_helpers
 from app.helpers.miscellaneous import get_video_rotation
 from app.helpers.embedding_tags import normalize_tags
+from app.ui.widgets.detachable_section import (
+    DetachedSectionPlaceholder,
+    DetachedSectionWindow,
+)
 
 if TYPE_CHECKING:
     from app.ui.main_ui import MainWindow
@@ -3332,6 +3336,16 @@ class FormGroupBox(QtWidgets.QGroupBox):
 
 
 class SectionHeaderButton(QtWidgets.QPushButton):
+    # Emitted (with the global cursor position) once the pop-out icon has been
+    # dragged far enough to count as "take this section out of the pane".
+    detach_drag_started = QtCore.Signal(QtCore.QPoint)
+    # Emitted when the icon is clicked while the section is in its own window.
+    dock_requested = QtCore.Signal()
+
+    _GRIP_WIDTH = 22
+    _GRIP_HEIGHT = 18
+    _GRIP_MARGIN = 5
+
     def __init__(self, title: str, expanded: bool = True, parent=None):
         super().__init__(title, parent)
         self._indicator_angle: float = 90.0 if expanded else 0.0
@@ -3347,6 +3361,13 @@ class SectionHeaderButton(QtWidgets.QPushButton):
         self.setStyleSheet("QPushButton {border: none;background: transparent;}")
         self._title = title
 
+        # Pop-out icon state (drag it out of the pane / click it to dock back).
+        self.setMouseTracking(True)
+        self._floating = False
+        self._grip_hover = False
+        self._grip_pressed = False
+        self._grip_press_global = QtCore.QPoint()
+
     def _get_indicator_angle(self) -> float:
         return self._indicator_angle
 
@@ -3360,21 +3381,146 @@ class SectionHeaderButton(QtWidgets.QPushButton):
         fset=_set_indicator_angle,
     )
 
+    # ------------------------------------------------------------ pop-out icon
+    def set_floating(self, floating: bool) -> None:
+        """Switch the icon between "drag me out" and "dock me back"."""
+        self._floating = bool(floating)
+        self._grip_pressed = False
+        self._grip_hover = False
+        self.setCursor(QtCore.Qt.PointingHandCursor)
+        self.update()
 
+    def _grip_rect(self) -> QtCore.QRect:
+        x = self.width() - self._GRIP_WIDTH - self._GRIP_MARGIN
+        y = (self.height() - self._GRIP_HEIGHT) // 2
+        return QtCore.QRect(x, y, self._GRIP_WIDTH, self._GRIP_HEIGHT)
+
+    def _over_grip(self, pos: QtCore.QPoint) -> bool:
+        return self._grip_rect().contains(pos)
+
+    def _grip_tooltip(self) -> str:
+        if self._floating:
+            return "Dock this section back into the panel"
+        return "Drag out to a separate window"
+
+    def _set_grip_hover(self, hover: bool) -> None:
+        if hover == self._grip_hover:
+            return
+        self._grip_hover = hover
+        if hover and not self._floating:
+            self.setCursor(QtCore.Qt.OpenHandCursor)
+        else:
+            self.setCursor(QtCore.Qt.PointingHandCursor)
+        self.update()
+
+    def _paint_grip(self, painter: QtGui.QPainter) -> None:
+        rect = self._grip_rect()
+        base = self.palette().buttonText().color()
+        active = self._grip_hover or self._grip_pressed
+
+        if active:
+            highlight = QtGui.QColor(base)
+            highlight.setAlpha(45)
+            painter.setPen(QtCore.Qt.PenStyle.NoPen)
+            painter.setBrush(highlight)
+            painter.drawRoundedRect(rect, 3, 3)
+
+        icon_color = QtGui.QColor(base)
+        icon_color.setAlpha(235 if active else 165)
+        pen = QtGui.QPen(icon_color, 1.3)
+        pen.setCapStyle(QtCore.Qt.PenCapStyle.RoundCap)
+        pen.setJoinStyle(QtCore.Qt.PenJoinStyle.RoundJoin)
+        painter.setPen(pen)
+        painter.setBrush(QtCore.Qt.BrushStyle.NoBrush)
+
+        # 12x12 icon: a window outline (open at the top right) plus an arrow.
+        origin = QtCore.QPointF(rect.center().x() - 5.5, rect.center().y() - 5.5)
+        path = QtGui.QPainterPath()
+        path.moveTo(5.5, 2.0)
+        path.lineTo(1.0, 2.0)
+        path.lineTo(1.0, 11.0)
+        path.lineTo(10.0, 11.0)
+        path.lineTo(10.0, 6.5)
+        path.moveTo(5.0, 7.0)
+        path.lineTo(11.0, 1.0)
+        if self._floating:  # arrow head points into the window: "dock"
+            path.moveTo(5.0, 3.5)
+            path.lineTo(5.0, 7.0)
+            path.lineTo(8.5, 7.0)
+        else:  # arrow head points out of the window: "pop out"
+            path.moveTo(7.5, 1.0)
+            path.lineTo(11.0, 1.0)
+            path.lineTo(11.0, 4.5)
+        painter.drawPath(path.translated(origin))
+
+    def event(self, ev: QtCore.QEvent) -> bool:
+        if ev.type() == QtCore.QEvent.Type.ToolTip:
+            if self._over_grip(ev.pos()):
+                QtWidgets.QToolTip.showText(ev.globalPos(), self._grip_tooltip(), self)
+            else:
+                QtWidgets.QToolTip.hideText()
+            return True
+        return super().event(ev)
+
+    def mousePressEvent(self, event: QtGui.QMouseEvent) -> None:
+        if (
+            event.button() == QtCore.Qt.MouseButton.LeftButton
+            and self._over_grip(event.position().toPoint())
+        ):
+            self._grip_pressed = True
+            self._grip_press_global = event.globalPosition().toPoint()
+            self.update()
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event: QtGui.QMouseEvent) -> None:
+        if self._grip_pressed:
+            global_pos = event.globalPosition().toPoint()
+            distance = (global_pos - self._grip_press_global).manhattanLength()
+            if (
+                not self._floating
+                and distance >= QtWidgets.QApplication.startDragDistance()
+            ):
+                self._grip_pressed = False
+                self.update()
+                self.detach_drag_started.emit(global_pos)
+            event.accept()
+            return
+        self._set_grip_hover(self._over_grip(event.position().toPoint()))
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event: QtGui.QMouseEvent) -> None:
+        if self._grip_pressed:
+            self._grip_pressed = False
+            self.update()
+            if (
+                event.button() == QtCore.Qt.MouseButton.LeftButton
+                and self._floating
+                and self._over_grip(event.position().toPoint())
+            ):
+                self.dock_requested.emit()
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
+
+    def leaveEvent(self, event: QtCore.QEvent) -> None:
+        self._set_grip_hover(False)
+        super().leaveEvent(event)
 
     def paintEvent(self, event):
         painter = QtGui.QPainter(self)
         painter.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
-    
+
         background_rect = self.rect().adjusted(0, 0, -1, -1)
-    
+
         painter.setPen(QtGui.QPen(QtGui.QColor("#38343D"), 1))
         painter.setBrush(QtGui.QColor("#08050C"))
         painter.drawRoundedRect(background_rect, 4, 4)
-    
+
         painter.setPen(QtCore.Qt.PenStyle.NoPen)
         painter.setBrush(self.palette().buttonText())
-    
+
         triangle = QtGui.QPolygonF(
             [
                 QtCore.QPointF(-3.5, -4.5),
@@ -3382,29 +3528,30 @@ class SectionHeaderButton(QtWidgets.QPushButton):
                 QtCore.QPointF(4.5, 0),
             ]
         )
-    
+
         center = QtCore.QPointF(11, self.height() / 2)
         painter.translate(center)
         painter.rotate(self._indicator_angle)
         painter.drawPolygon(triangle)
         painter.resetTransform()
-    
-        text_rect = self.rect().adjusted(24, 0, -8, 0)
+
+        text_rect = self.rect().adjusted(
+            24, 0, -(self._GRIP_WIDTH + self._GRIP_MARGIN + 6), 0
+        )
         painter.setPen(self.palette().buttonText().color())
-    
+
         font = painter.font()
         font.setWeight(QtGui.QFont.Weight.Bold)
         painter.setFont(font)
-    
+
         painter.drawText(
             text_rect,
             QtCore.Qt.AlignmentFlag.AlignVCenter | QtCore.Qt.AlignmentFlag.AlignLeft,
             self._title,
         )
-    
+
+        self._paint_grip(painter)
         painter.end()
-
-
 
 
 class CollapsibleSection(QtWidgets.QWidget):
@@ -3412,6 +3559,9 @@ class CollapsibleSection(QtWidgets.QWidget):
     _collapsed_layout_spacing = 0
     _expanded_bottom_margin = 2
     _collapsed_bottom_margin = 2
+
+    expanded_changed = QtCore.Signal(bool)
+    detached_changed = QtCore.Signal(bool)
 
     def __init__(
         self,
@@ -3424,7 +3574,10 @@ class CollapsibleSection(QtWidgets.QWidget):
         super().__init__(parent)
         self.main_window = main_window
         self.section_id = section_id
+        self.section_title = title
         self._expanded = expanded
+        self._detached_window: DetachedSectionWindow | None = None
+        self._placeholder: DetachedSectionPlaceholder | None = None
 
         self.setSizePolicy(
             QtWidgets.QSizePolicy.Policy.Expanding,
@@ -3435,6 +3588,8 @@ class CollapsibleSection(QtWidgets.QWidget):
         self.header_button.clicked.connect(
             lambda _checked=False: self.toggle_expanded()
         )
+        self.header_button.detach_drag_started.connect(self._on_detach_drag_started)
+        self.header_button.dock_requested.connect(self.dock)
 
         self.content_widget = QtWidgets.QWidget(self)
         self.content_widget.setVisible(expanded)
@@ -3534,5 +3689,114 @@ class CollapsibleSection(QtWidgets.QWidget):
         if update_state:
             self.main_window.parameter_section_states[self.section_id] = expanded
 
+        self.expanded_changed.emit(expanded)
+
     def toggle_expanded(self):
         self.set_expanded(not self._expanded)
+
+    # ------------------------------------------------------ separate window
+    def is_detached(self) -> bool:
+        return self._detached_window is not None
+
+    def detached_window(self) -> DetachedSectionWindow | None:
+        return self._detached_window
+
+    def _on_detach_drag_started(self, global_pos: QtCore.QPoint) -> None:
+        self.detach(global_pos=global_pos, drag=True)
+
+    def _focus_detached_window(self) -> None:
+        window = self._detached_window
+        if window is not None:
+            window.raise_()
+            window.activateWindow()
+
+    def detach(
+        self,
+        global_pos: QtCore.QPoint | None = None,
+        geometry: QtCore.QRect | None = None,
+        drag: bool = False,
+    ) -> DetachedSectionWindow | None:
+        """Move this section out of its pane into its own window.
+
+        ``global_pos`` places the window under the cursor (and, with
+        ``drag=True``, keeps it following the cursor until the mouse button is
+        released); ``geometry`` restores a saved window rectangle.
+        """
+        if self._detached_window is not None:
+            self._focus_detached_window()
+            return self._detached_window
+
+        host = self.parentWidget()
+        host_layout = host.layout() if host is not None else None
+        index = host_layout.indexOf(self) if host_layout is not None else -1
+        if host_layout is None or index < 0:
+            return None
+
+        width = max(self.width(), self.sizeHint().width(), 280)
+
+        # A slim bar keeps the slot in the pane so docking restores the order.
+        placeholder = DetachedSectionPlaceholder(self.section_title, parent=host)
+        placeholder.activate_requested.connect(self._focus_detached_window)
+        placeholder.dock_requested.connect(self.dock)
+        host_layout.removeWidget(self)
+        host_layout.insertWidget(index, placeholder)
+        placeholder.show()
+
+        window = DetachedSectionWindow(self.main_window, self, self.section_title)
+        self._placeholder = placeholder
+        self._detached_window = window
+        self.header_button.set_floating(True)
+        window.adopt_section(width)
+
+        if geometry is not None:
+            window.setGeometry(geometry)
+        elif global_pos is not None:
+            window.position_for_drag(global_pos)
+        else:
+            window.position_beside_main()
+
+        window.show()
+        self.show()
+        if geometry is not None:
+            window.ensure_on_screen()
+        window.raise_()
+        window.activateWindow()
+        if drag and global_pos is not None:
+            window.begin_drag(global_pos)
+
+        self.detached_changed.emit(True)
+        return window
+
+    def dock(self) -> None:
+        """Put the section back into the pane, at its original position."""
+        window = self._detached_window
+        if window is None:
+            return
+        placeholder = self._placeholder
+        self._detached_window = None
+        self._placeholder = None
+        self.header_button.set_floating(False)
+
+        window.release_section()
+
+        host_layout = None
+        index = -1
+        if placeholder is not None:
+            host = placeholder.parentWidget()
+            host_layout = host.layout() if host is not None else None
+            if host_layout is not None:
+                index = host_layout.indexOf(placeholder)
+                host_layout.removeWidget(placeholder)
+            placeholder.hide()
+            placeholder.deleteLater()
+
+        if host_layout is not None:
+            if index < 0:
+                index = max(host_layout.count() - 1, 0)  # before the end stretch
+            host_layout.insertWidget(index, self)
+            self.show()
+            host_layout.invalidate()
+
+        window.discard()
+        self.updateGeometry()
+        self.detached_changed.emit(False)

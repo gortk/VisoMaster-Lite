@@ -1338,6 +1338,8 @@ def _workspace_after_inputs(main_window, data, data_filename):
         elif "parameter_section_states" in data:
             states = data["parameter_section_states"]
         main_window.apply_parameter_section_states(states)
+        if isinstance(window_state.get("detached_sections"), dict):
+            main_window.apply_detached_sections_state(window_state["detached_sections"])
 
     def _ws_filter():
         filter_actions.filter_target_videos(main_window)
@@ -1497,6 +1499,7 @@ def save_current_workspace(
             ).items()
         },
         "dock_state": dock_state_data,
+        "detached_sections": main_window.get_detached_sections_state(),
     }
 
     control = main_window.control

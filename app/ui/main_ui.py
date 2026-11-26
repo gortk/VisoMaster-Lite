@@ -1296,6 +1296,12 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
         except Exception:
             pass
         self.extension_manager.trigger_hook("on_app_close")
+        # Bring any popped-out sections home before the window goes away
+        # (their position was already written by the autosave above).
+        try:
+            self.dock_all_parameter_sections()
+        except Exception as exc:  # never block shutting down
+            print(f"[WARN] MainWindow: could not dock detached sections: {exc}")
         # Optionally handle the event if needed
         event.accept()
 
@@ -1441,6 +1447,52 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
             expanded = bool(section_states.get(section_id, True))
             self.parameter_section_states[section_id] = expanded
             section_widget.set_expanded(expanded, animate=False, update_state=False)
+
+    # ---- Sections popped out of the right pane into their own windows ----
+    def get_detached_sections_state(self) -> dict[str, list[int]]:
+        """section_id -> [x, y, width, height] for every section in its own window."""
+        state: dict[str, list[int]] = {}
+        for section_id, section in self.parameter_sections.items():
+            window = section.detached_window()
+            if window is None:
+                continue
+            rect = window.geometry()
+            state[section_id] = [rect.x(), rect.y(), rect.width(), rect.height()]
+        return state
+
+    def apply_detached_sections_state(
+        self, detached: dict | None, _attempt: int = 0
+    ) -> None:
+        """Re-open saved section windows; docks any section not in ``detached``."""
+        if not isinstance(detached, dict):
+            return
+        # Windows owned by a main window that is not on screen yet would be
+        # created hidden, so wait (briefly) until the main window is shown.
+        if not self.isVisible() and _attempt < 40:
+            QtCore.QTimer.singleShot(
+                250, lambda: self.apply_detached_sections_state(detached, _attempt + 1)
+            )
+            return
+        for section_id, section in self.parameter_sections.items():
+            if section_id not in detached:
+                if section.is_detached():
+                    section.dock()
+                continue
+            if section.is_detached():
+                continue
+            geometry = None
+            try:
+                x, y, w, h = (int(v) for v in detached[section_id])
+                if w > 0 and h > 0:
+                    geometry = QtCore.QRect(x, y, w, h)
+            except (TypeError, ValueError):
+                geometry = None
+            section.detach(geometry=geometry)
+
+    def dock_all_parameter_sections(self) -> None:
+        for section in list(self.parameter_sections.values()):
+            if section.is_detached():
+                section.dock()
 
     @QtCore.Slot(bool)
     def _on_faces_panel_toggled(self, checked: bool):

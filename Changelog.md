@@ -1,3 +1,8 @@
+### 1.0.14
+
+- NEW: modular detachable windows for each pane control. Now you can click the detach icon on any section
+  and drag it away from its dock position to keep it always at hand. Click the detach icon to re-attach it.
+
 ### 1.0.13
 
 - Fixed leftover shortcut key to fullscreen mode causing a benign error in the console (still trying to trigger 
