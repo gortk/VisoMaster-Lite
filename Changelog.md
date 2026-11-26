@@ -2,6 +2,8 @@
 
 - NEW: modular detachable windows for each pane control. Now you can click the detach icon on any section
   and drag it away from its dock position to keep it always at hand. Click the detach icon to re-attach it.
+- Optimized session saving at exit, now the app will not compute hashes for every k/v map that didn't change.
+  In other words it should be slightly faster when closing the app if you have embeddings with k/v maps.
 
 ### 1.0.13
 

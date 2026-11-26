@@ -32,6 +32,7 @@ if TYPE_CHECKING:
     from app.ui.main_ui import MainWindow
 
 _KV_REGISTRY_LOCK = threading.Lock()
+_KV_CACHE_LOCK = threading.RLock()
 _WORKSPACE_WRITE_LOCK = threading.Lock()
 
 
@@ -142,37 +143,122 @@ def _update_registry(
                 print(f"[ERROR] Failed to write KV registry to {registry_path}: {e}")
 
 
+def _kv_payload_cache_signature(value, seen=None):
+    """Return a cheap mutation signature, or None for unsupported payload objects.
+
+    Tensor version counters detect in-place PyTorch updates without reading tensor
+    contents. Container identities and child signatures detect structural changes.
+    """
+    if seen is None:
+        seen = set()
+
+    value_id = id(value)
+    if value_id in seen:
+        return ("cycle", value_id)
+
+    if isinstance(value, torch.Tensor):
+        try:
+            version = value._version
+        except Exception:
+            # Some inference tensors do not expose a version counter. Do not cache
+            # these: serializing them is safer than risking a stale content hash.
+            return None
+        return ("tensor", value_id, version)
+
+    if isinstance(value, dict):
+        seen.add(value_id)
+        items = []
+        for key, child in value.items():
+            child_signature = _kv_payload_cache_signature(child, seen)
+            if child_signature is None:
+                seen.remove(value_id)
+                return None
+            items.append((key, child_signature))
+        seen.remove(value_id)
+        return ("dict", value_id, tuple(items))
+
+    if isinstance(value, (list, tuple)):
+        seen.add(value_id)
+        children = []
+        for child in value:
+            child_signature = _kv_payload_cache_signature(child, seen)
+            if child_signature is None:
+                seen.remove(value_id)
+                return None
+            children.append(child_signature)
+        seen.remove(value_id)
+        return (type(value).__name__, value_id, tuple(children))
+
+    if value is None or isinstance(value, (bool, int, float, str, bytes)):
+        return (type(value).__name__, value)
+
+    # Unknown mutable/custom objects may change without changing identity.
+    return None
+
+
 def _save_hashed_kv_payload(
     main_window: "MainWindow",
     payload: dict,
     sub_folder: str = "reference_kv_data",
     parent_file_paths: Optional[Union[str, List[str]]] = None,
 ) -> Optional[str]:
-    """
-    Serializes a K/V map payload, computes its SHA-256 hash, and saves it to disk.
-    Prevents duplicates by only saving if the hash-based file doesn't exist.
-    Registers multiple dependencies (e.g., workspace JSON and source image) in a central JSON manifest.
+    """Save a content-addressed K/V payload, reusing hashes for unchanged objects.
+
+    The cache is scoped to this MainWindow and holds a strong reference to each
+    cached payload object, preventing Python object-id reuse. Tensor version
+    counters invalidate entries after in-place tensor updates. Registry updates
+    still happen on every call, including cache hits.
     """
     try:
-        buffer = io.BytesIO()
-        torch.save(payload, buffer)
-        buffer_bytes = buffer.getvalue()
-
-        payload_hash = hashlib.sha256(buffer_bytes).hexdigest()
-
+        # Callers wrap one K/V object in a one-key dict. Cache that underlying
+        # object rather than the short-lived wrapper created on every save.
+        cache_value = next(iter(payload.values())) if len(payload) == 1 else payload
+        cache_signature = _kv_payload_cache_signature(cache_value)
+        cache_key = (str(sub_folder), id(cache_value))
         kv_data_dir = main_window.project_root_path / "model_assets" / sub_folder
-        kv_data_dir.mkdir(parents=True, exist_ok=True)
+        kv_map_file = None
 
-        kv_map_file = kv_data_dir / f"kv_{payload_hash}.pt"
+        cache = getattr(main_window, "_kv_payload_save_cache", None)
+        if cache is None:
+            cache = {}
+            main_window._kv_payload_save_cache = cache
 
-        if not kv_map_file.exists():
-            with open(kv_map_file, "wb") as f:
-                f.write(buffer_bytes)
-            print(f"[INFO] Saved new K/V map: {kv_map_file.name}")
+        if cache_signature is not None:
+            with _KV_CACHE_LOCK:
+                cached = cache.get(cache_key)
+                if (
+                    cached is not None
+                    and cached[0] is cache_value
+                    and cached[1] == cache_signature
+                    and cached[2].parent == kv_data_dir
+                    and cached[2].is_file()
+                ):
+                    kv_map_file = cached[2]
+
+        if kv_map_file is not None:
+            # No torch.save(), CPU copy, or SHA-256 pass on an unchanged payload.
+            pass
         else:
-            print(
-                f"[INFO] K/V map {kv_map_file.name} already exists. Skipping disk write."
-            )
+            buffer = io.BytesIO()
+            torch.save(payload, buffer)
+            buffer_bytes = buffer.getvalue()
+            payload_hash = hashlib.sha256(buffer_bytes).hexdigest()
+
+            kv_data_dir.mkdir(parents=True, exist_ok=True)
+            kv_map_file = kv_data_dir / f"kv_{payload_hash}.pt"
+
+            if not kv_map_file.exists():
+                with open(kv_map_file, "wb") as f:
+                    f.write(buffer_bytes)
+                print(f"[INFO] Saved new K/V map: {kv_map_file.name}")
+            else:
+                print(
+                    f"[INFO] K/V map {kv_map_file.name} already exists. Skipping disk write."
+                )
+
+            if cache_signature is not None:
+                with _KV_CACHE_LOCK:
+                    cache[cache_key] = (cache_value, cache_signature, kv_map_file)
 
         if parent_file_paths:
             _update_registry(
