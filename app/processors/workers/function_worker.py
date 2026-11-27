@@ -21,6 +21,7 @@ from app.processors.face_detailer import FaceDetailer
 from app.processors.frame_edits import FrameEdits
 from app.processors.models_data import arcface_mapping_model_dict
 from app.processors.utils import platform_support
+from app.processors.utils import gpu_profile as _gp
 
 if TYPE_CHECKING:
     from app.processors.models_processor import ModelsProcessor
@@ -150,6 +151,11 @@ class FunctionWorker:
         """Serialize each session and isolate GFPGAN from other ORT inference."""
         session_lock = self._get_session_lock(session)
 
+        # Opt-in timing (VISOMASTER_PROFILE_GPU=1); a single bool check when disabled.
+        prof = _gp.ENABLED
+        if prof:
+            t0 = _gp.perf()
+
         # 1. PRE-INFERENCE SYNC (Outside the lock)
         # Ensure PyTorch has finished writing inputs to the GPU on the isolated worker_stream.
         # This occurs outside the lock so other threads aren't blocked during tensor prep.
@@ -160,16 +166,24 @@ class FunctionWorker:
 
         exclusive = self.mp.models.get("GFPGANv1.4") is session
         run_options = self._ort_run_options(session)
+        if prof:
+            t1 = _gp.perf()
 
         # 2. Keep GFPGAN isolated from every other ORT/TensorRT inference.
         with self._ort_inference_gate(exclusive):
+            if prof:
+                t2 = _gp.perf()
             # 3. INFERENCE AND CORRECT POST-SYNC (Inside the session lock)
             with session_lock:
+                if prof:
+                    t3 = _gp.perf()
                 # Execute ONNX Runtime / TensorRT.
                 if run_options is not None:
                     session.run_with_iobinding(io_binding, run_options)
                 else:
                     session.run_with_iobinding(io_binding)
+                if prof:
+                    t4 = _gp.perf()
 
                 # 4. POST-INFERENCE SYNC (MUST BE INSIDE BOTH LOCKS)
                 # We use ORT's native synchronization instead of PyTorch's stream sync.
@@ -177,6 +191,12 @@ class FunctionWorker:
                 # This guarantees ORT is completely finished writing the pre-allocated output tensors
                 # before we release the locks to the next worker thread.
                 io_binding.synchronize_outputs()
+                if prof:
+                    t5 = _gp.perf()
+
+        # Recorded after both locks are released so profiling never lengthens lock hold time.
+        if prof:
+            _gp.ort_call(t1 - t0, t2 - t1, t3 - t2, t4 - t3, t5 - t4)
 
     # --- Models Unloaders ---
 

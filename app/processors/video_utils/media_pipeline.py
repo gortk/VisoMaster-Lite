@@ -1397,17 +1397,6 @@ class MediaPipeline(QObject):
         seek_time_ms = int(seek_time * 1000)
 
         playback_rate = 1.0
-        if (
-            self.main_window.control.get("VideoPlaybackCustomFpsToggle", False)
-            and not self.vp.recording
-        ):
-            fpscust = self.main_window.control.get("VideoPlaybackCustomFpsSlider", fps)
-            if fps > 0 and fpscust > 0:
-                playback_rate = fpscust / fps
-
-        # SAFETY: Qt does not support negative rates or exactly 0.0.
-        if playback_rate < 0.01:
-            playback_rate = 0.01
 
         # 0. Lazy load QtMultimedia to save VRAM on idle workspaces
         if self.media_player is None:

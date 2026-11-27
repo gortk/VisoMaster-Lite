@@ -19,6 +19,7 @@ import numpy as np
 
 from app.processors.utils import faceutil
 from app.processors.utils import platform_support
+from app.processors.utils import gpu_profile as _gp
 
 from app.helpers.miscellaneous import (
     find_best_target_match,
@@ -506,9 +507,14 @@ class FrameWorker(threading.Thread):
                         self.frame = np.ascontiguousarray(self.frame)
 
                     # Process Frame (returns BGR, uint8)
+                    if _gp.ENABLED:
+                        _gp.frame_begin()
+                        _gp_t_frame = _gp.perf()
                     processed_frame_bgr_np_uint8 = self.process_frame(
                         local_control_state, self.stop_event
                     )
+                    if _gp.ENABLED:
+                        _gp.frame_end(_gp.perf() - _gp_t_frame)
 
                     # Ensure output is C-contiguous for Qt display
                     self.frame = np.ascontiguousarray(processed_frame_bgr_np_uint8)
@@ -671,12 +677,20 @@ class FrameWorker(threading.Thread):
         img_numpy_rgb_uint8 = self.frame
         assert img_numpy_rgb_uint8 is not None, "frame must be set before processing"
 
-        # Prepare the base tensor
-        img_chw = np.ascontiguousarray(img_numpy_rgb_uint8.transpose(2, 0, 1))
-
-        processed_tensor_rgb_uint8 = torch.from_numpy(img_chw).to(
-            self.models_processor.device
+        # Prepare the base tensor.
+        # Upload the frame as-is (HWC) and do the HWC -> CHW transpose on the GPU instead of
+        # materialising a transposed copy on the CPU first. The resulting CHW tensor is
+        # bit-identical to the previous path.
+        if _gp.ENABLED:
+            _gp_t_up = _gp.perf()
+        processed_tensor_rgb_uint8 = (
+            torch.from_numpy(np.ascontiguousarray(img_numpy_rgb_uint8))
+            .to(self.models_processor.device)
+            .permute(2, 0, 1)
+            .contiguous()
         )
+        if _gp.ENABLED:
+            _gp.add("upload", _gp.perf() - _gp_t_up)
 
         # --- ROUTING LOGIC ---
         if control.get("VR180ModeEnableToggle", False):
@@ -703,12 +717,36 @@ class FrameWorker(threading.Thread):
                 processed_tensor_rgb_uint8, control=control
             )
 
+        if _gp.ENABLED:
+            _gp_t_down = _gp.perf()
+
+        if processed_tensor_rgb_uint8.dtype == torch.uint8 and (
+            processed_tensor_rgb_uint8.dim() == 3
+        ):
+            # Fast path (data movement only, identical values): flip RGB -> BGR and go
+            # CHW -> HWC on the GPU, so the single device->host copy already yields a
+            # C-contiguous BGR uint8 array. This replaces a strided CPU copy, an astype()
+            # copy, an ascontiguousarray() copy and the negative-stride BGR view.
+            final_bgr_np_uint8 = (
+                processed_tensor_rgb_uint8.flip(0)
+                .permute(1, 2, 0)
+                .contiguous()
+                .cpu()
+                .numpy()
+            )
+            if _gp.ENABLED:
+                _gp.add("download", _gp.perf() - _gp_t_down)
+            return final_bgr_np_uint8
+
+        # Fallback for any non-uint8 tensor: original behaviour.
         final_img_np_rgb_uint8 = (
             processed_tensor_rgb_uint8.permute(1, 2, 0).cpu().numpy().astype(np.uint8)
         )
         if not final_img_np_rgb_uint8.flags["C_CONTIGUOUS"]:
             final_img_np_rgb_uint8 = np.ascontiguousarray(final_img_np_rgb_uint8)
 
+        if _gp.ENABLED:
+            _gp.add("download", _gp.perf() - _gp_t_down)
         return final_img_np_rgb_uint8[..., ::-1]
 
     def get_face_similarity_tform(

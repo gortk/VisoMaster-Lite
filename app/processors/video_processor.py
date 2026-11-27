@@ -625,10 +625,7 @@ class VideoProcessor(QObject):
                     self.fps = self.recording_source_fps
         else:
             self._used_ffmpeg_cap = False
-            if self.main_window.control["VideoPlaybackCustomFpsToggle"]:
-                self.fps = self.main_window.control["VideoPlaybackCustomFpsSlider"]
-            else:
-                self.fps = self.recording_source_fps
+            self.fps = self.recording_source_fps
 
         mode = "recording (default-style)" if self.recording else "playback"
         print(f"[INFO] Starting video {mode} processing setup...")
@@ -2203,28 +2200,6 @@ class VideoProcessor(QObject):
         finally:
             shutil.rmtree(temp_audio_dir, ignore_errors=True)
 
-    def _auto_save_workspace_for_output(self, final_file_path: str) -> None:
-        if not final_file_path:
-            return
-
-        if self.main_window.control.get("AutoSaveWorkspaceToggle"):
-            try:
-                save_load_actions.save_current_workspace(
-                    self.main_window, f"{final_file_path}.json"
-                )
-            except Exception as e:
-                print(f"[WARN] Failed to auto-save workspace after recording: {e}")
-
-        if self.main_window.control.get("AutoSaveLastWorkspaceToggle"):
-            try:
-                save_load_actions.save_current_workspace(
-                    self.main_window, str(self.main_window.last_workspace_path)
-                )
-            except Exception as e:
-                print(
-                    f"[WARN] Failed to auto-save last_workspace.json after recording: {e}"
-                )
-
     def _purge_queues_and_buffers(self) -> None:
         """
         Explicitly destroys heavy numpy arrays in display buffers and queues.
@@ -2584,7 +2559,6 @@ class VideoProcessor(QObject):
         reason = (result or {}).get("reason")
 
         if success:
-            self._auto_save_workspace_for_output(final_file_path)
             common_widget_actions.create_and_show_toast_message(
                 self.main_window,
                 "Video Saved",
