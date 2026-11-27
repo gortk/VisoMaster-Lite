@@ -442,7 +442,17 @@ def _capture_base_snapshot(main_window: "MainWindow") -> None:
 def _apply_segment_to_state(main_window: "MainWindow", segment: dict) -> None:
     if segment is None or segment.get("parameters") is None:
         return
+    base_params = getattr(main_window, "_segments_base_parameters", None)
+    if base_params is not None:
+        for face_id, face_params in base_params.items():
+            if face_id not in segment["parameters"]:
+                segment["parameters"][face_id] = face_params
     main_window.parameters = segment["parameters"]
+    for face_id_key in list(main_window.target_faces.keys()):
+        if str(face_id_key) not in main_window.parameters:
+            common_widget_actions.create_parameter_dict_for_face_id(
+                main_window, str(face_id_key)
+            )
     if segment.get("control") is not None:
         main_window.control = segment["control"]
 
@@ -2255,11 +2265,6 @@ def run_post_seek_actions(main_window: "MainWindow", new_position: int):
             update_widget_values_from_markers(main_window, new_position)
     else:
         _capture_base_snapshot(main_window)
-        track_markers_enabled = main_window.control.get("TrackMarkersToggle", False)
-        if track_markers_enabled:
-            with main_window.models_processor.model_lock:
-                update_parameters_and_control_from_marker(main_window, new_position)
-                update_widget_values_from_markers(main_window, new_position)
 
     main_window._in_normal_segment = now_in_segment
 

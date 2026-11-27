@@ -267,6 +267,10 @@ def find_target_faces(
                     found = False
                     # Check if this face has already been found
                     for face_id, target_face in main_window.target_faces.items():
+                        if target_face.face_id not in main_window.parameters:
+                            common_widget_actions.create_parameter_dict_for_face_id(
+                                main_window, target_face.face_id
+                            )
                         parameters = main_window.parameters[target_face.face_id]
                         threshhold = parameters.get("SimilarityThresholdSlider", 0.6)
                         if main_window.function_worker.findCosineDistance(

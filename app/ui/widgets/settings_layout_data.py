@@ -247,26 +247,11 @@ SETTINGS_LAYOUT_DATA: Any = {
             "exec_function": control_actions.change_threads_number,
             "exec_function_args": [],
         },
-        "nStreamSlider": {
-            "level": 1,
-            "label": "Number of Streams (High VRAM usage)",
-            "min_value": "1",
-            "max_value": "15",
-            "default": "1",
-            "step": 1,
-            "help": "Set number of Worker Streams while playing and recording. Depends strongly on GPU VRAM. Will be used on new processing task.",
-        },
         "KeepControlsToggle": {
             "level": 1,
             "label": "Keep Controls Active",
             "default": False,
             "help": "Keep the controls active during recording.",
-        },
-        "TrackMarkersToggle": {
-            "level": 1,
-            "label": "Track Markers on Video Seek",
-            "default": False,
-            "help": "Update parameters and controls when seeking the video to reflect the options status for it's position.",
         },
         "GlobalInputResizeToggle": {
             "level": 1,
@@ -315,25 +300,6 @@ SETTINGS_LAYOUT_DATA: Any = {
         },
     },
     "Video Playback Settings": {
-        "VideoPlaybackCustomFpsToggle": {
-            "level": 1,
-            "label": "Set Custom Video Playback FPS",
-            "default": False,
-            "help": "Manually set the FPS used for video playback preview only (does not affect recording output FPS).",
-            "exec_function": control_actions.set_video_playback_fps,
-            "exec_function_args": [],
-        },
-        "VideoPlaybackCustomFpsSlider": {
-            "level": 2,
-            "label": "Video Playback FPS",
-            "min_value": "1",
-            "max_value": "120",
-            "default": "30",
-            "parentToggle": "VideoPlaybackCustomFpsToggle",
-            "requiredToggleValue": True,
-            "step": 1,
-            "help": "Set the maximum FPS of the video when playing",
-        },
         "VideoPlaybackBufferingToggle": {
             "level": 1,
             "label": "Playback Buffering",
@@ -351,12 +317,6 @@ SETTINGS_LAYOUT_DATA: Any = {
             "label": "Playback Loop",
             "default": False,
             "help": "Auto start over when video playing to the end.(Not work for recording)",
-        },
-        "TheatreModeUsesFullscreenToggle": {
-            "level": 1,
-            "label": "Theatre Mode Uses Fullscreen",
-            "default": False,
-            "help": "When enabled, entering Theatre Mode also switches the window to fullscreen and restores the previous window state when Theatre Mode is turned off.",
         },
         "FrameSkipStepSlider": {
             "level": 1,
@@ -969,18 +929,6 @@ SETTINGS_LAYOUT_DATA: Any = {
             "label": "Save Output Image in JPG Format",
             "default": False,
             "help": "Saves the output image from Save Image or Batch Process to JPG format instead of PNG.",
-        },
-        "AutoSaveWorkspaceToggle": {
-            "level": 1,
-            "label": "Auto Save Workspace",
-            "default": False,
-            "help": "Auto Saves Workspace .json in output folder at end of recording (only the status at end of recording)",
-        },
-        "AutoSaveLastWorkspaceToggle": {
-            "level": 1,
-            "label": "Auto Save Last Workspace",
-            "default": False,
-            "help": "Auto Saves last_workspace.json in the project root at end of recording (only the status at end of recording)",
         },
         "AutoLoadWorkspaceToggle": {
             "level": 1,

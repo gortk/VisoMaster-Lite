@@ -3,6 +3,15 @@
 - Small patches for small performance. Not going to lie its more like "code cleaning" than perceptible speed
   gains. Maybe people using videos from 1080p onwards may see a little improvement in video playback.
   Also people that still use faces instead of embeddings should find that the app loads a little faster.
+- Removed obsolete/unnecessary options in Settings: 
+  eliminate "number of streams" from settings
+  eliminate "set custom video playback fps" from settings
+  eliminate "threatre mode uses fullscreen" from settings
+  eliminate "auto save workspace" from settings
+  eliminate "auto save last workspace" from settings
+  eliminate "track markers on video seek"
+- Fixed segments not loading their individual settings  
+
 
 ### 1.0.14
 
@@ -10,6 +19,7 @@
   and drag it away from its dock position to keep it always at hand. Click the detach icon to re-attach it.
 - Optimized session saving at exit, now the app will not compute hashes for every k/v map that didn't change.
   In other words it should be slightly faster when closing the app if you have embeddings with k/v maps.
+
 
 ### 1.0.13
 
