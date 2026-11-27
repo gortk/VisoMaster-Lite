@@ -44,14 +44,58 @@ def _write_crash_log(exc: BaseException) -> Path:
     return log_path
 
 
+def _show_early_splash():
+    """Show the splash as soon as a QApplication exists, i.e. BEFORE the heavy
+    application imports (onnxruntime, cv2, every processor/UI module).
+
+    Returns the QSplashScreen, or None if the image is missing/unreadable.
+    Purely cosmetic: any failure here is swallowed so it can never block start-up.
+    """
+    try:
+        from PySide6 import QtCore, QtGui, QtWidgets
+
+        splash_path = (
+            Path(__file__).resolve().parent
+            / "app"
+            / "ui"
+            / "core"
+            / "media"
+            / "splash.png"
+        )
+        pixmap = QtGui.QPixmap(str(splash_path))
+        if pixmap.isNull():
+            return None
+        screen = QtWidgets.QApplication.primaryScreen()
+        geo = screen.availableGeometry()
+        dpr = screen.devicePixelRatio() or 1.0
+        # Same sizing rules as MainWindow._show_loading_splash: real pixel size,
+        # never larger than 80% of the screen.
+        max_w = int(geo.width() * dpr * 0.8)
+        max_h = int(geo.height() * dpr * 0.8)
+        if pixmap.width() > max_w or pixmap.height() > max_h:
+            pixmap = pixmap.scaled(
+                max_w,
+                max_h,
+                QtCore.Qt.AspectRatioMode.KeepAspectRatio,
+                QtCore.Qt.TransformationMode.SmoothTransformation,
+            )
+        pixmap.setDevicePixelRatio(dpr)
+        splash = QtWidgets.QSplashScreen(pixmap)
+        splash.setWindowFlag(QtCore.Qt.WindowType.FramelessWindowHint, True)
+        splash.setWindowFlag(QtCore.Qt.WindowType.WindowStaysOnTopHint, False)
+        splash.move(geo.center() - splash.rect().center())
+        splash.show()
+        QtWidgets.QApplication.processEvents()
+        return splash
+    except Exception:
+        return None
+
+
 def _run_app() -> None:
     """Boot the Qt app. Imports are inside the function so any startup error is
     captured by the outer try/except (otherwise a top-level import error would
     bypass the crash-log writer)."""
-    from app.ui import main_ui
     from PySide6 import QtWidgets
-
-    import qdarktheme
     from app.ui.core.proxy_style import ProxyStyle
 
     parser = argparse.ArgumentParser(description="VisoMaster")
@@ -63,19 +107,52 @@ def _run_app() -> None:
     )
     args, remaining = parser.parse_known_args()
 
+    # torch is already imported (module top, before PySide6 is loaded for the
+    # first time), so the import order that was used before is unchanged.
     app = QtWidgets.QApplication(remaining)
-    app.setStyle(ProxyStyle())
-    with open("app/ui/styles/true_dark_styles.qss", "r") as f:
-        _style = f.read()
-        _style = (
-            qdarktheme.load_stylesheet(
-                theme="dark", custom_colors={"primary": "#4090a3"}
+    early_splash = _show_early_splash()
+
+    try:
+        # Heavy part: onnxruntime, cv2 and every app module. The splash is
+        # already on screen while this runs.
+        from app.ui import main_ui
+
+        import qdarktheme
+
+        app.setStyle(ProxyStyle())
+        with open("app/ui/styles/true_dark_styles.qss", "r") as f:
+            _style = f.read()
+            _style = (
+                qdarktheme.load_stylesheet(
+                    theme="dark", custom_colors={"primary": "#4090a3"}
+                )
+                + "\n"
+                + _style
             )
-            + "\n"
-            + _style
-        )
-        app.setStyleSheet(_style)
-    window = main_ui.MainWindow(gpu_id=args.gpu_id)
+            app.setStyleSheet(_style)
+
+        if early_splash is not None:
+            # Hand over to MainWindow's own splash without a gap: close this one
+            # right after MainWindow has shown its splash.
+            _orig_show_splash = main_ui.MainWindow._show_loading_splash
+
+            def _show_splash_then_close_early(self, *a, **kw):
+                result = _orig_show_splash(self, *a, **kw)
+                try:
+                    early_splash.close()
+                except Exception:
+                    pass
+                return result
+
+            main_ui.MainWindow._show_loading_splash = _show_splash_then_close_early
+
+        window = main_ui.MainWindow(gpu_id=args.gpu_id)
+    finally:
+        if early_splash is not None:
+            try:
+                early_splash.close()
+            except Exception:
+                pass
     from app.ui.widgets.actions import frame_step_actions
 
     frame_step_actions.add_frame_step_controls(window)

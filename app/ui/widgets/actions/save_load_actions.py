@@ -1096,7 +1096,7 @@ def _workspace_load_begin(main_window, data, data_filename):
         _schedule(
             main_window,
             partial(_poll_target_thumbnails_then_continue, main_window, data, data_filename),
-            50,
+            15,
         )
     else:
         main_window.video_loader_worker = None
@@ -1115,7 +1115,7 @@ def _poll_target_thumbnails_then_continue(main_window, data, data_filename):
         _schedule(
             main_window,
             partial(_poll_target_thumbnails_then_continue, main_window, data, data_filename),
-            50,
+            15,
         )
         return
     _workspace_after_targets(main_window, data, data_filename)
@@ -1164,7 +1164,7 @@ def _workspace_after_targets(main_window, data, data_filename):
         _schedule(
             main_window,
             partial(_poll_input_thumbnails_then_continue, main_window, data, data_filename),
-            50,
+            15,
         )
     else:
         main_window.input_faces_loader_worker = None
@@ -1185,7 +1185,7 @@ def _poll_input_thumbnails_then_continue(main_window, data, data_filename):
         _schedule(
             main_window,
             partial(_poll_input_thumbnails_then_continue, main_window, data, data_filename),
-            50,
+            15,
         )
         return
     _workspace_after_inputs(main_window, data, data_filename)

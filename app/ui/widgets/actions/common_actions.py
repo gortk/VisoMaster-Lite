@@ -562,9 +562,13 @@ def get_pixmap_from_frame(main_window: "MainWindow", frame: np.ndarray):
     else:
         # Frame in color
         bytes_per_line = 3 * width
+        # Frames are BGR. Format_BGR888 reads them natively, so the full-frame
+        # RGB888 -> rgbSwapped() copy on the GUI thread is no longer needed.
+        # QPixmap.fromImage() below still makes the deep copy, so the numpy
+        # buffer is not referenced after this function returns.
         q_img = QtGui.QImage(
-            frame.data, width, height, bytes_per_line, QtGui.QImage.Format.Format_RGB888
-        ).rgbSwapped()
+            frame.data, width, height, bytes_per_line, QtGui.QImage.Format.Format_BGR888
+        )
     pixmap = QtGui.QPixmap.fromImage(q_img)
     return pixmap
 
@@ -666,10 +670,11 @@ def extract_frame_as_image(
         height, width, _ = frame.shape
         bytes_per_line = 3 * width
 
-        # Format_RGB888 strictly respects PySide6 enums
+        # Frames are BGR; Format_BGR888 reads them natively (no rgbSwapped() copy).
+        # Both branches below deep-copy, so the numpy buffer is not kept.
         q_img = QtGui.QImage(
-            frame.data, width, height, bytes_per_line, QtGui.QImage.Format.Format_RGB888
-        ).rgbSwapped()
+            frame.data, width, height, bytes_per_line, QtGui.QImage.Format.Format_BGR888
+        )
 
         if scale is None:
             # .copy() decouples the QImage from the numpy array memory, which

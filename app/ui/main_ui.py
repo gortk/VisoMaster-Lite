@@ -1406,17 +1406,17 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
                     self._on_workspace_load_finished()
                     _restore_auto_watch_after_load()
                     return
-                if polls >= 20 and not in_progress and not seen_in_progress:
+                if polls >= 80 and not in_progress and not seen_in_progress:
                     self._on_workspace_load_finished()
                     _restore_auto_watch_after_load()
                     return
                 QtCore.QTimer.singleShot(
-                    100,
+                    25,
                     lambda: _wait_and_restore(
                         seen_in_progress or in_progress, polls + 1
                     ),
                 )
-            QtCore.QTimer.singleShot(100, _wait_and_restore)
+            QtCore.QTimer.singleShot(25, _wait_and_restore)
         else:
             _restore_auto_watch_after_load()
             self._on_workspace_load_finished()

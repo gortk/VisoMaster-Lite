@@ -38,6 +38,21 @@ def _invalidate_kv_merge_cache(main_window):
     if cache is not None:
         cache.clear()
 
+def _release_memory_if_idle(main_window) -> None:
+    """gc.collect() + torch.cuda.empty_cache(), skipped while video is processing.
+
+    empty_cache() performs a device-wide sync and forces the allocator to re-grab
+    VRAM, which stalls playback/recording when called from the GUI thread.
+    The memory is simply reclaimed on the next idle release instead.
+    """
+    video_processor = getattr(main_window, "video_processor", None)
+    if video_processor is not None and getattr(video_processor, "processing", False):
+        return
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+
 class TwoLineElidedLabel(QtWidgets.QLabel):
     def __init__(self, text: str = "", parent=None):
         super().__init__(parent)
@@ -524,9 +539,7 @@ class TargetMediaCardButton(CardButton):
 
             # Free media-related GPU memory only (keep models loaded)
             if not getattr(main_window, "is_batch_processing", False):
-                gc.collect()
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
+                _release_memory_if_idle(main_window)
 
         i = self.get_item_position()
         if i is not None:
@@ -1373,9 +1386,7 @@ class TargetFaceCardButton(CardButton):
         _invalidate_kv_merge_cache(main_window)
 
         self.deleteLater()
-        gc.collect()
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
+        _release_memory_if_idle(self.main_window)
 
     def get_display_label(self) -> str:
         item_position = self.get_item_position()
@@ -1522,9 +1533,7 @@ class InputFaceCardButton(CardButton):
                 cur_selected_target_face_button.assigned_input_faces.pop(self.face_id)
             cur_selected_target_face_button.calculate_assigned_input_embedding()
             if not self.isChecked():
-                gc.collect()
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
+                _release_memory_if_idle(main_window)
         else:
             if (
                 not QtWidgets.QApplication.keyboardModifiers()
@@ -1953,9 +1962,7 @@ class EmbeddingCardButton(CardButton):
                 )
             cur_selected_target_face_button.calculate_assigned_input_embedding()
             if not self.isChecked():
-                gc.collect()
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
+                _release_memory_if_idle(main_window)
         else:
             if (
                 not QtWidgets.QApplication.keyboardModifiers()

@@ -1,4 +1,7 @@
 import uuid
+import hashlib
+import json
+from pathlib import Path
 from typing import TYPE_CHECKING, Dict, List, Tuple, Optional
 import traceback
 import os
@@ -37,6 +40,91 @@ def _iter_bounded(executor, fn, items, window):
 
 if TYPE_CHECKING:
     from app.ui.main_ui import MainWindow
+
+
+# --- Input-face embedding cache -------------------------------------------------
+# Detection + recognition of an unchanged image with unchanged settings always gives
+# the same result, so it is stored on disk and reused on the next load/launch.
+# A cache miss (or any error reading/writing the cache) falls back to the normal
+# detect + recognize path, so the cache can never change what a face looks like.
+# The folder can be deleted at any time.
+_INPUT_FACE_CACHE_VERSION = 1
+_INPUT_FACE_CACHE_DIRNAME = "input_faces_cache"
+
+
+def _input_face_cache_settings_key(control: dict) -> str:
+    """Every setting that influences the detected face / embedding / crop."""
+    settings = {
+        "v": _INPUT_FACE_CACHE_VERSION,
+        "det": str(control.get("DetectorModelSelection", "RetinaFace")),
+        "det_score": float(control.get("DetectorScoreSlider", 50)),
+        "lmk": bool(control.get("LandmarkDetectToggle", False)),
+        "lmk_mode": str(control.get("LandmarkDetectModelSelection", "203")),
+        "lmk_score": float(control.get("LandmarkDetectScoreSlider", 50)),
+        "from_points": bool(control.get("DetectFromPointsToggle", False)),
+        "auto_rot": bool(control.get("AutoRotationToggle", False)),
+        "rec": str(control.get("RecognitionModelSelection", "Inswapper128ArcFace")),
+        "provider": str(control.get("ProvidersPrioritySelection", "")),
+    }
+    return json.dumps(settings, sort_keys=True)
+
+
+def _input_face_cache_key(image_path: str, settings_key: str) -> Optional[str]:
+    try:
+        st = os.stat(image_path)
+    except OSError:
+        return None
+    raw = (
+        f"{os.path.normcase(os.path.abspath(image_path))}|"
+        f"{st.st_mtime_ns}|{st.st_size}|{settings_key}"
+    )
+    return hashlib.sha1(raw.encode("utf-8", "surrogatepass")).hexdigest()
+
+
+def _input_face_cache_load(cache_dir: Optional[Path], key: Optional[str]):
+    """Returns (embedding, kps_5, face_img_bgr) or None."""
+    if cache_dir is None or key is None:
+        return None
+    path = cache_dir / f"{key}.npz"
+    if not path.is_file():
+        return None
+    try:
+        with numpy.load(path, allow_pickle=False) as z:
+            emb, kps, img = z["emb"], z["kps"], z["img"]
+        if img.ndim != 3 or img.dtype != numpy.uint8:
+            return None
+        return emb, kps, numpy.ascontiguousarray(img)
+    except Exception:
+        return None
+
+
+def _input_face_cache_save(
+    cache_dir: Optional[Path], key: Optional[str], emb, kps, img
+) -> None:
+    if cache_dir is None or key is None:
+        return
+    # Only plain numpy data is cached; anything else just isn't cached.
+    if not (
+        isinstance(emb, numpy.ndarray)
+        and isinstance(kps, numpy.ndarray)
+        and isinstance(img, numpy.ndarray)
+        and img.dtype == numpy.uint8
+    ):
+        return
+    tmp = None
+    try:
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        tmp = cache_dir / f"{key}.{uuid.uuid4().hex}.tmp"
+        with open(tmp, "wb") as f:
+            numpy.savez(f, emb=emb, kps=kps, img=img)
+        os.replace(tmp, cache_dir / f"{key}.npz")
+        tmp = None
+    except Exception:
+        if tmp is not None:
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
 
 
 class TargetMediaLoaderWorker(qtc.QThread):
@@ -389,26 +477,68 @@ class InputFacesLoaderWorker(qtc.QThread):
                 f_id = self.face_ids[idx] if self.face_ids else str(uuid.uuid1().int)
                 paired_files_ids.append((path, f_id))
 
-        def load_image_task(
-            image_path: str, f_id: str
-        ) -> Tuple[str, str, Optional[numpy.ndarray]]:
+        # Embedding cache (see _input_face_cache_* above).
+        cache_dir: Optional[Path] = None
+        try:
+            _root = getattr(self.main_window, "project_root_path", None)
+            if _root is not None:
+                cache_dir = Path(_root) / _INPUT_FACE_CACHE_DIRNAME
+        except Exception:
+            cache_dir = None
+        cache_settings_key = _input_face_cache_settings_key(control)
+        selected_recognition_model = str(
+            control.get("RecognitionModelSelection", "Inswapper128ArcFace")
+        )
+
+        def load_image_task(image_path: str, f_id: str):
+            """Returns (path, id, frame | None, cache_key, cached | None).
+
+            On a cache hit the image is not even decoded (frame is None)."""
             if not misc_helpers.is_image_file(image_path):
-                return image_path, f_id, None
+                return image_path, f_id, None, None, None
+            cache_key = _input_face_cache_key(image_path, cache_settings_key)
+            cached = _input_face_cache_load(cache_dir, cache_key)
+            if cached is not None:
+                return image_path, f_id, None, cache_key, cached
             frame = misc_helpers.read_image_file(image_path)
             if frame is None:
-                return image_path, f_id, None
-            return image_path, f_id, frame
+                return image_path, f_id, None, cache_key, None
+            return image_path, f_id, frame, cache_key, None
 
         max_workers = min(16, (os.cpu_count() or 1) + 4)
         window = max_workers
 
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            for image_file_path, face_id, frame in _iter_bounded(
-                executor, load_image_task, paired_files_ids, window
-            ):
+            for (
+                image_file_path,
+                face_id,
+                frame,
+                cache_key,
+                cached,
+            ) in _iter_bounded(executor, load_image_task, paired_files_ids, window):
                 if not self._running:
                     executor.shutdown(wait=False, cancel_futures=True)
                     break
+
+                if cached is not None:
+                    # Cache hit: identical result to a fresh detect + recognize.
+                    c_emb, c_kps, c_face_img = cached
+                    c_h, c_w, _c = c_face_img.shape
+                    c_q_image = QImage(
+                        c_face_img.data,
+                        c_w,
+                        c_h,
+                        3 * c_w,
+                        QImage.Format_BGR888,
+                    ).copy()
+                    self.thumbnail_ready.emit(
+                        image_file_path,
+                        c_face_img,
+                        {selected_recognition_model: c_emb, "kps_5": c_kps},
+                        c_q_image,
+                        face_id,
+                    )
+                    continue
 
                 if frame is None:
                     continue
@@ -485,6 +615,10 @@ class InputFacesLoaderWorker(qtc.QThread):
 
                     self.thumbnail_ready.emit(
                         image_file_path, face_img, embedding_store, q_image, face_id
+                    )
+
+                    _input_face_cache_save(
+                        cache_dir, cache_key, face_emb, face_kps, face_img
                     )
 
                     del img, face_emb, cropped_img, cropped_img_np, face_img
