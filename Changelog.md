@@ -1,3 +1,9 @@
+### 1.0.15
+
+- Small patches for small performance. Not going to lie its more like "code cleaning" than perceptible speed
+  gains. Maybe people using videos from 1080p onwards may see a little improvement in video playback.
+  Also people that still use faces instead of embeddings should find that the app loads a little faster.
+
 ### 1.0.14
 
 - NEW: modular detachable windows for each pane control. Now you can click the detach icon on any section
