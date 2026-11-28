@@ -882,6 +882,11 @@ def set_widgets_values_using_face_id_parameters(
                     widget.enable_refresh_frame = True
     finally:
         main_window._batch_update_in_progress = previous_batch_flag
+        # Toggle exec functions are skipped when the loaded value equals the stored one,
+        # so re-sync widgets whose enabled state depends on a toggle.
+        from app.ui.widgets.actions import control_actions
+
+        control_actions.sync_kps_auto_scale_state(main_window)
         # Trigger a single refresh only if this function owns the outermost batch scope.
         if not previous_batch_flag:
             refresh_frame(main_window)

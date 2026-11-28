@@ -506,10 +506,20 @@ class StandardProcessor:
                                 ]
                                 source_kps = store.get("kps_5")
 
+                        _auto_kps = self.worker._compute_auto_kps_offsets(
+                            img,
+                            best_fface.get("bbox"),
+                            best_fface["kps_5"],
+                            best_fface.get("kps_203"),
+                            params,
+                            control,
+                            face_id=target_face.face_id if target_face else None,
+                        )
                         best_fface["kps_5"] = keypoints_adjustments(
                             best_fface["kps_5"],
                             cast(dict, params),
                             source_kps=source_kps,
+                            auto_offsets=_auto_kps,
                         )
 
                         s_e = None
@@ -654,8 +664,20 @@ class StandardProcessor:
                                 ]
                                 source_kps = store.get("kps_5")
 
+                        _auto_kps = self.worker._compute_auto_kps_offsets(
+                            img,
+                            fface.get("bbox"),
+                            fface["kps_5"],
+                            fface.get("kps_203"),
+                            params,
+                            control,
+                            face_id=best_target.face_id if best_target else None,
+                        )
                         fface["kps_5"] = keypoints_adjustments(
-                            fface["kps_5"], params, source_kps=source_kps
+                            fface["kps_5"],
+                            params,
+                            source_kps=source_kps,
+                            auto_offsets=_auto_kps,
                         )
 
                         arcface_model = self.worker.function_worker.get_arcface_model(

@@ -1015,6 +1015,88 @@ def handle_auto_mouth_toggle(main_window: "MainWindow", new_value: bool) -> None
         )
 
 
+_KPS_AUTO_SLIDERS = ("KpsXSlider", "KpsYSlider", "KpsScaleSlider")
+
+
+def show_kps_auto_values(
+    main_window: "MainWindow", face_id: str, x: int, y: int, scale: int
+) -> None:
+    """Display the automatically computed Keypoints X/Y/Scale in the (greyed-out) sliders.
+
+    Runs on the GUI thread (queued signal from the frame workers). Only the display is
+    changed: the stored manual parameter values are left untouched, so they come back
+    when the automatic mode is switched off.
+    """
+    if str(face_id) != str(main_window.selected_target_face_id):
+        return
+    toggle = main_window.parameter_widgets.get("KpsAutoScaleEnableToggle")
+    if toggle is None or not toggle.isChecked():
+        return
+
+    for slider_name, value in zip(_KPS_AUTO_SLIDERS, (x, y, scale)):
+        slider = main_window.parameter_widgets.get(slider_name)
+        if slider is not None and slider.value() != value:
+            slider.setValue(value)
+
+
+def sync_kps_auto_scale_state(main_window: "MainWindow") -> None:
+    """Re-apply the grey-out state of the Keypoints sliders from the toggle's current value.
+
+    Toggle exec functions only run when a value *changes*, so they are skipped when a
+    saved session, workspace, preset or another target face is loaded with the toggle
+    already on. Call this after widget values are loaded to cover those cases.
+    """
+    toggle = main_window.parameter_widgets.get("KpsAutoScaleEnableToggle")
+    if toggle is None:
+        return
+    try:
+        _apply_kps_auto_scale_state(
+            main_window, bool(toggle.isChecked()), restore_manual_values=False
+        )
+    except Exception as e:
+        print(f"[WARN] Could not sync Automatic Keypoints Scale state: {e}")
+
+
+def handle_kps_auto_scale_toggle(main_window: "MainWindow", new_value: bool) -> None:
+    """Grey out the manual Keypoints X/Y/Scale sliders while the automatic mode drives them.
+
+    The 203-point landmark model used for the analysis is loaded lazily on the first
+    processed frame, so nothing needs to be preloaded here.
+    """
+    _apply_kps_auto_scale_state(main_window, new_value, restore_manual_values=True)
+
+
+def _apply_kps_auto_scale_state(
+    main_window: "MainWindow", new_value: bool, restore_manual_values: bool
+) -> None:
+    manual_enabled = not bool(new_value)
+
+    face_id = main_window.selected_target_face_id
+    stored = main_window.parameters.get(face_id) if face_id else None
+    if not stored:
+        stored = main_window.current_widget_parameters or {}
+
+    for slider_name in _KPS_AUTO_SLIDERS:
+        slider = main_window.parameter_widgets.get(slider_name)
+        if slider is None:
+            continue
+
+        if manual_enabled and restore_manual_values:
+            # Automatic mode switched off: show the user's own manual values again.
+            slider.setValue(int(stored.get(slider_name, slider.default_value)))
+
+        slider.setEnabled(manual_enabled)
+        for attr in (
+            "row_widget",
+            "label_widget",
+            "reset_default_button",
+            "line_edit",
+        ):
+            sub_widget = getattr(slider, attr, None)
+            if sub_widget:
+                sub_widget.setEnabled(manual_enabled)
+
+
 def handle_ff_auto_quality_toggle(main_window: "MainWindow", new_value: bool) -> None:
     """Disable manual FFQualitySlider while auto source-quality matching is enabled."""
     quality_widget = main_window.parameter_widgets.get("FFQualitySlider")

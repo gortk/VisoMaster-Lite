@@ -1371,15 +1371,94 @@ def calculate_pose_disparity_weight(src_kps: np.ndarray, tgt_kps: np.ndarray) ->
     return min(yaw_weight, pitch_weight)
 
 
+# --- Automatic Keypoints Scale: safety limits -------------------------------------
+# Maximum automatic scale correction, in "Keypoints Scale" slider units (percent).
+_AUTO_KPS_MAX_SCALE_PCT = 30.0
+# Maximum automatic X/Y shift, as a fraction of the inter-ocular distance.
+_AUTO_KPS_MAX_SHIFT_RATIO = 0.30
+# If the reference landmarks still disagree with the detector keypoints by more than
+# this fraction of the inter-ocular distance after the best scale+shift fit, the
+# reference is considered unreliable and no automatic correction is applied.
+_AUTO_KPS_MAX_RESIDUAL_RATIO = 0.25
+
+
+def compute_auto_kps_offsets(
+    kps_5: np.ndarray,
+    ref_kps_5: np.ndarray,
+) -> Optional[Tuple[float, float, float]]:
+    """
+    Computes the optimum "Keypoints X-Axis", "Keypoints Y-Axis" and "Keypoints Scale"
+    slider values for one face.
+
+    The detector's 5 keypoints (``kps_5``) are what the swapper aligns the face with.
+    ``ref_kps_5`` are 5 reference points derived from an independent, dense landmark
+    analysis of the same image (eye centres, nose tip, mouth corners). The returned
+    values are the least-squares translation + uniform scale (about the keypoint
+    centroid, exactly like the manual sliders) that bring ``kps_5`` onto the reference.
+
+    Returns ``(x_shift_px, y_shift_px, scale_percent)`` or ``None`` when the analysis
+    is not trustworthy (invalid or inconsistent input).
+    """
+    try:
+        det = np.asarray(kps_5, dtype=np.float64)[:5]
+        ref = np.asarray(ref_kps_5, dtype=np.float64)[:5]
+    except (TypeError, ValueError):
+        return None
+
+    if det.shape != (5, 2) or ref.shape != (5, 2):
+        return None
+    if not (np.isfinite(det).all() and np.isfinite(ref).all()):
+        return None
+
+    eye_dist = float(np.linalg.norm(det[1] - det[0]))
+    if eye_dist < 1e-3:
+        return None
+
+    det_c = det.mean(axis=0)
+    ref_c = ref.mean(axis=0)
+    det_rel = det - det_c
+    ref_rel = ref - ref_c
+
+    denom = float((det_rel * det_rel).sum())
+    if denom < 1e-6:
+        return None
+
+    # Optimal uniform scale (no rotation: the sliders cannot rotate) about the centroid.
+    scale = float((det_rel * ref_rel).sum() / denom)
+    if not np.isfinite(scale) or scale <= 0.2:
+        return None
+
+    # Reject references that do not resemble the detection at all.
+    residual = float(np.sqrt(np.mean(np.sum((det_rel * scale - ref_rel) ** 2, axis=1))))
+    if residual / eye_dist > _AUTO_KPS_MAX_RESIDUAL_RATIO:
+        return None
+
+    shift = ref_c - det_c
+    max_shift = _AUTO_KPS_MAX_SHIFT_RATIO * eye_dist
+    shift_x = float(np.clip(shift[0], -max_shift, max_shift))
+    shift_y = float(np.clip(shift[1], -max_shift, max_shift))
+    scale_pct = float(
+        np.clip(
+            (scale - 1.0) * 100.0, -_AUTO_KPS_MAX_SCALE_PCT, _AUTO_KPS_MAX_SCALE_PCT
+        )
+    )
+    return shift_x, shift_y, scale_pct
+
+
 def keypoints_adjustments(
     kps_5: np.ndarray,
     parameters: Mapping[str, Any],
     source_kps: Optional[np.ndarray] = None,
+    auto_offsets: Optional[Tuple[float, float, float]] = None,
 ) -> np.ndarray:
     """
     Adjusts facial keypoints for morphing and manual alignments.
     Uses a Local Anisotropic Alignment strategy based on the eye-line.
     Includes a dynamic 3D pose-penalty to prevent affine stretching on profile shots.
+
+    ``auto_offsets`` is an optional ``(x, y, scale)`` triple from
+    :func:`compute_auto_kps_offsets`. It replaces the Keypoints X/Y/Scale sliders
+    while "Automatic Keypoints Scale" is enabled.
     """
     # Create a fresh copy to prevent mutating the original array in shared memory
     kps_5_adj = kps_5.copy()
@@ -1465,12 +1544,20 @@ def keypoints_adjustments(
 
     # --- MANUAL ALIGNMENTS (Sliders) ---
     if parameters.get("FaceAdjEnableToggle", False):
+        if parameters.get("KpsAutoScaleEnableToggle", False):
+            # Automatic mode: the sliders are ignored. If the analysis failed for this
+            # face, leave the keypoints untouched rather than using stale slider values.
+            kps_x, kps_y, scale_val = auto_offsets or (0.0, 0.0, 0.0)
+        else:
+            kps_x = parameters.get("KpsXSlider", 0.0)
+            kps_y = parameters.get("KpsYSlider", 0.0)
+            scale_val = parameters.get("KpsScaleSlider", 0.0)
+
         # 1. Apply spatial translations (X / Y Axis)
-        kps_5_adj[:, 0] += parameters.get("KpsXSlider", 0.0)
-        kps_5_adj[:, 1] += parameters.get("KpsYSlider", 0.0)
+        kps_5_adj[:, 0] += kps_x
+        kps_5_adj[:, 1] += kps_y
 
         # 2. Apply spatial scaling
-        scale_val = parameters.get("KpsScaleSlider", 0.0)
         if scale_val != 0.0:
             scale_factor = 1.0 + (scale_val / 100.0)
             centroid = np.mean(kps_5_adj, axis=0)

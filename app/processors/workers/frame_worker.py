@@ -22,6 +22,7 @@ from app.processors.utils import platform_support
 from app.processors.utils import gpu_profile as _gp
 
 from app.helpers.miscellaneous import (
+    compute_auto_kps_offsets,
     find_best_target_match,
     get_scaling_transforms,
 )
@@ -597,6 +598,113 @@ class FrameWorker(threading.Thread):
                         f"[WARN] Fallback emit also failed for frame "
                         f"{self.frame_number}: {fb_err}"
                     )
+
+    @staticmethod
+    def _bbox_from_kps5(kps_5: np.ndarray) -> np.ndarray:
+        """Rough square face box around 5 keypoints (only used when no detector box is known)."""
+        kps = np.asarray(kps_5, dtype=np.float32)[:5]
+        eye_dist = float(np.linalg.norm(kps[1] - kps[0]))
+        axis_len = float(
+            np.linalg.norm((kps[3] + kps[4]) / 2.0 - (kps[0] + kps[1]) / 2.0)
+        )
+        half = max(eye_dist, axis_len) * 1.1
+        cx, cy = kps.mean(axis=0)
+        return np.array([cx - half, cy - half, cx + half, cy + half], dtype=np.float32)
+
+    def _compute_auto_kps_offsets(
+        self,
+        img: torch.Tensor,
+        bbox: np.ndarray | None,
+        kps_5: np.ndarray | None,
+        kps_203: np.ndarray | None,
+        parameters: Any,
+        control: dict[str, Any],
+        face_id: Any = None,
+    ) -> tuple[float, float, float] | None:
+        """
+        "Automatic Keypoints Scale": analyses the face and returns the optimum
+        (Keypoints X, Keypoints Y, Keypoints Scale) slider values, or None when the
+        feature is off or the analysis is not trustworthy for this face.
+
+        The detector's 5 keypoints are compared against 5 reference points taken from
+        the 203-point landmark model (eye centres, nose tip, mouth corners). The
+        scale/shift that best aligns the two sets is what the sliders would need to be
+        set to, see ``compute_auto_kps_offsets``.
+
+        Must be called with the *unadjusted* detector keypoints.
+        """
+        if not (
+            parameters.get("FaceAdjEnableToggle", False)
+            and parameters.get("KpsAutoScaleEnableToggle", False)
+        ):
+            return None
+        if kps_5 is None or len(kps_5) < 5:
+            return None
+
+        offsets = self._analyse_auto_kps(img, bbox, kps_5, kps_203, control)
+        self._publish_auto_kps(face_id, offsets)
+        return offsets
+
+    def _publish_auto_kps(
+        self, face_id: Any, offsets: tuple[float, float, float] | None
+    ) -> None:
+        """Mirror the automatic values into the Keypoints sliders (GUI thread, via signal)."""
+        if face_id is None:
+            return
+        try:
+            x, y, s = offsets if offsets is not None else (0.0, 0.0, 0.0)
+            self.main_window.kps_auto_values_signal.emit(
+                str(face_id), int(round(x)), int(round(y)), int(round(s))
+            )
+        except Exception:
+            pass  # display only; never affect processing
+
+    def _analyse_auto_kps(
+        self,
+        img: torch.Tensor,
+        bbox: np.ndarray | None,
+        kps_5: np.ndarray,
+        kps_203: np.ndarray | None,
+        control: dict[str, Any],
+    ) -> tuple[float, float, float] | None:
+        try:
+            use_mean_eyes = bool(control.get("LandmarkMeanEyesToggle", False))
+            ref_5 = None
+
+            # Reuse the 203 landmarks if they were already extracted for this face.
+            if kps_203 is not None:
+                k203 = np.asarray(kps_203, dtype=np.float32)
+                if k203.shape == (203, 2) and np.isfinite(k203).all() and np.any(k203):
+                    ref_5 = faceutil.convert_face_landmark_203_to_5(
+                        k203, use_mean_eyes=use_mean_eyes
+                    )
+
+            # Otherwise analyse the image now.
+            if ref_5 is None:
+                face_bbox = (
+                    np.asarray(bbox, dtype=np.float32)
+                    if bbox is not None
+                    else self._bbox_from_kps5(kps_5)
+                )
+                lm_5, _, _ = self.function_worker.run_detect_landmark(
+                    img,
+                    face_bbox,
+                    np.asarray(kps_5, dtype=np.float32),
+                    detect_mode="203",
+                    score=0.5,
+                    use_mean_eyes=use_mean_eyes,
+                    from_points=True,
+                )
+                if lm_5 is None or len(lm_5) < 5:
+                    return None
+                ref_5 = np.asarray(lm_5, dtype=np.float32)
+
+            return compute_auto_kps_offsets(kps_5, ref_5)
+        except Exception as e:  # never let an analysis failure break the swap
+            if not getattr(self, "_auto_kps_warned", False):
+                self._auto_kps_warned = True
+                print(f"[WARN] Automatic Keypoints Scale analysis failed: {e}")
+            return None
 
     def _find_best_target_match(
         self,

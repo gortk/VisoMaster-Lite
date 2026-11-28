@@ -89,6 +89,8 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
     model_loading_signal = QtCore.Signal()
     model_loaded_signal = QtCore.Signal()
     display_messagebox_signal = QtCore.Signal(str, str, QtWidgets.QWidget)
+    # Automatic Keypoints Scale: (face_id, x, y, scale) computed on a worker thread
+    kps_auto_values_signal = QtCore.Signal(str, int, int, int)
 
     def initialize_variables(self):
         self.video_loader_worker: ui_workers.TargetMediaLoaderWorker | None = None
@@ -224,6 +226,9 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
         )
         self.display_messagebox_signal.connect(
             partial(common_widget_actions.create_and_show_messagebox, self)
+        )
+        self.kps_auto_values_signal.connect(
+            partial(control_actions.show_kps_auto_values, self)
         )
         self.last_seek_read_failed = False
         self.embedding_editor_window = None

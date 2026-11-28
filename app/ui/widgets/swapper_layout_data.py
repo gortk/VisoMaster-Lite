@@ -293,7 +293,7 @@ SWAPPER_LAYOUT_DATA: Any = {  # noqa: F811
             "step": 0.05,
             "parentToggle": "FaceKeypointsReplaceEnableToggle",
             "requiredToggleValue": True,
-            "help": "Determines the factor of KPS transfert from target to the source face.",
+            "help": "Determines the factor of KPS transfer from target to the source face.",
         },
     },
     "Masks": {
@@ -1759,6 +1759,23 @@ SWAPPER_LAYOUT_DATA: Any = {  # noqa: F811
             "label": "Face Adjustments",
             "default": False,
             "help": "This is an experimental feature to perform direct adjustments to the face landmarks found by the detector. There is also an option to adjust the scale of the swapped face.",
+        },
+        "KpsAutoScaleEnableToggle": {
+            "level": 2,
+            "label": "Automatic Keypoints Scale 💬",
+            "default": False,
+            "parentToggle": "FaceAdjEnableToggle",
+            "requiredToggleValue": True,
+            "exec_function": control_actions.handle_kps_auto_scale_toggle,
+            "exec_function_args": [],
+            "help": (
+                "Analyzes each target face with the 203-point landmark model and automatically "
+                "sets Keypoints X-Axis, Y-Axis and Scale to the values that best align the "
+                "detector keypoints with the real eye, nose and mouth positions.\n"
+                "The manual Keypoints sliders are ignored while this is enabled.\n"
+                "⚠ Costs one extra landmark inference per face and frame (will slow down recording).\n"
+                "💡 Recommended only for small clips/gifs.\n"
+            ),
         },
         "KpsXSlider": {
             "level": 2,

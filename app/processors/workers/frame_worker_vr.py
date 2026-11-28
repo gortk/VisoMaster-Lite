@@ -337,10 +337,20 @@ class VRProcessor:
                     ]
                     source_kps = store.get("kps_5")
 
+            _auto_kps_vr = self.worker._compute_auto_kps_offsets(
+                perspective_crop_torch_rgb_uint8,
+                None,
+                kps_5_on_crop_param,
+                None,
+                parameters_for_face,
+                control_global,
+                face_id=getattr(target_face_button, "face_id", None),
+            )
             kps_5_on_crop_param = keypoints_adjustments(
                 kps_5_on_crop_param,
                 cast(dict, parameters_for_face),
                 source_kps=source_kps,  # type: ignore[arg-type]
+                auto_offsets=_auto_kps_vr,
             )
             _params_for_swap_vr = self.worker._apply_auto_mouth(
                 parameters_for_face.data,  # plain dict — VR convention

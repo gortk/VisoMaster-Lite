@@ -1,3 +1,13 @@
+### 1.0.16
+
+- NEW: "Automatic Keypoints Scale" under "Face Adjustments" (Face Swap tab). 
+  This new feature will automatically do a pass on each frame to determine the best alignment
+  for the donor face on the target face, results are subtle and it will cost one inference per frame
+  so recordings will be slightly slowed down. Recommended on short clips/gifs/static images 
+  rather than longer videos but can be used anyway. If you use the manual mode it will not cost extra 
+  inference time (like before) since it uses one manual set value for all the video regardless of the current frame.
+
+
 ### 1.0.15
 
 - Small patches for small performance. Not going to lie its more like "code cleaning" than perceptible speed
