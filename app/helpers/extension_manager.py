@@ -11,6 +11,43 @@ class ExtensionManager:
         if not self.extensions_dir.exists():
             self.extensions_dir.mkdir(parents=True, exist_ok=True)
         self.loaded_extensions = []
+        self._manager_dialog = None
+
+    def install_menu(self):
+        """Adds an "Extensions" menu (Extension Manager...) to the main menu bar."""
+        from PySide6 import QtGui, QtWidgets
+
+        menubar = getattr(self.main_window, "topMenuBar", None)
+        if menubar is None:
+            return
+        menu = QtWidgets.QMenu("Extensions", menubar)
+        menu.addAction("Extension Manager...").triggered.connect(self.show_manager)
+        menu.addSeparator()
+        menu.addAction("Open Extensions Folder").triggered.connect(
+            lambda: QtGui.QDesktopServices.openUrl(
+                QtCore.QUrl.fromLocalFile(
+                    str(self.extensions_dir)
+                )
+            )
+        )
+        help_menu = getattr(self.main_window, "menuHelp", None)
+        if help_menu is not None:
+            menubar.insertMenu(help_menu.menuAction(), menu)
+        else:
+            menubar.addMenu(menu)
+        self._extensions_menu = menu
+
+    def show_manager(self):
+        """Opens (or focuses) the Extension Manager dialog."""
+        from app.ui.widgets.extension_manager_dialog import ExtensionManagerDialog
+
+        if self._manager_dialog is None:
+            self._manager_dialog = ExtensionManagerDialog(
+                self.main_window, self.extensions_dir
+            )
+        self._manager_dialog.show()
+        self._manager_dialog.raise_()
+        self._manager_dialog.activateWindow()
 
     def load_all(self):
         """Scans the extensions folder and loads all .py files."""

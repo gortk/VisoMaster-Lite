@@ -1,3 +1,8 @@
+### 1.0.17
+
+- NEW: Extension manager. Now you can download and update extension from inside the app like in Stable Diffusion.
+  You can use the "official" repo or set one you know.
+
 ### 1.0.16
 
 - NEW: "Automatic Keypoints Scale" under "Face Adjustments" (Face Swap tab). 

@@ -1014,6 +1014,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
         self._pump_splash()
         self.load_last_workspace()
         self.extension_manager = ExtensionManager(self)
+        self.extension_manager.install_menu()
         self.extension_manager.load_all()
 
     def _pump_splash(self) -> None:
